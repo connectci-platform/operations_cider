@@ -1,7 +1,7 @@
 name: Operations - CiDeR
 description: 'Drupal Feed of ACCESS Integrated Resources'
 type: module
-core_version_requirement: ^9 || ^10
+core_version_requirement: ^10 || ^11
 package: Custom
 dependencies:
   - drupal:feeds
