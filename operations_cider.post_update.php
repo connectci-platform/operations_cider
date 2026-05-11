@@ -66,3 +66,60 @@ function operations_cider_post_update_generate_documentation_resources_aliases()
 
   return "Generated {$created} new /documentation/resources/* aliases (existing /rp-documentation/* aliases preserved).";
 }
+
+/**
+ * Backfill field_cider_short_name with node title where empty.
+ *
+ * The rp_documentation pathauto pattern uses [node:field_cider_short_name];
+ * any access_active_resources_from_cid node without a short_name from CIDeR
+ * needs a fallback so its alias is not generated as an empty slug.
+ */
+function operations_cider_post_update_d2719_01_backfill_short_name_with_title(): string {
+  $storage = \Drupal::entityTypeManager()->getStorage('node');
+  $nids = $storage->getQuery()
+    ->accessCheck(FALSE)
+    ->condition('type', 'access_active_resources_from_cid')
+    ->execute();
+
+  $filled = 0;
+  foreach ($storage->loadMultiple($nids) as $node) {
+    if (trim((string) $node->get('field_cider_short_name')->value) !== '') {
+      continue;
+    }
+    $node->set('field_cider_short_name', $node->getTitle());
+    $node->save();
+    $filled++;
+  }
+
+  return "Backfilled field_cider_short_name with title on {$filled} nodes.";
+}
+
+/**
+ * Regenerate /documentation/resources/* aliases using new short_name pattern.
+ *
+ * The rp_documentation pattern now produces shorter slugs from
+ * field_cider_short_name. Replace existing long-title aliases so the
+ * canonical URL is the short one.
+ */
+function operations_cider_post_update_d2719_02_regenerate_short_aliases(): string {
+  if (!\Drupal::moduleHandler()->moduleExists('pathauto')) {
+    return 'pathauto module not enabled — skipping alias regeneration.';
+  }
+
+  $generator = \Drupal::service('pathauto.generator');
+  $storage = \Drupal::entityTypeManager()->getStorage('node');
+
+  $nids = $storage->getQuery()
+    ->accessCheck(FALSE)
+    ->condition('type', 'access_active_resources_from_cid')
+    ->execute();
+
+  $updated = 0;
+  foreach ($storage->loadMultiple($nids) as $node) {
+    if ($generator->updateEntityAlias($node, 'bulkupdate')) {
+      $updated++;
+    }
+  }
+
+  return "Regenerated {$updated} /documentation/resources/* aliases using short_name pattern.";
+}
