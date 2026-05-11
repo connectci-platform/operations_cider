@@ -25,6 +25,37 @@ function operations_cider_node_insert(EntityInterface $entity) {
 }
 
 /**
+ * Implements hook_node_load().
+ *
+ * For RP documentation nodes (access_active_resources_from_cid), use the
+ * field_cider_short_name as the display title. The CIDER feed populates
+ * the long descriptive title (e.g., "NCSA Delta CPU (Delta CPU)") into
+ * node->title; the short name (e.g., "Delta CPU") is more usable in:
+ *   - the page H1
+ *   - the browser <title>
+ *   - breadcrumbs
+ *   - entity-reference autocompletes / admin lists
+ *
+ * setTitle() mutates the loaded entity instance; it does not persist.
+ * The CiDeR sync round-trips through Feeds which re-reads the title from
+ * the feed source, so this override does not leak into the DB.
+ */
+function operations_cider_node_load(array $entities) {
+  foreach ($entities as $node) {
+    if ($node->bundle() !== 'access_active_resources_from_cid') {
+      continue;
+    }
+    if (!$node->hasField('field_cider_short_name')) {
+      continue;
+    }
+    $short = $node->get('field_cider_short_name')->value;
+    if ($short !== NULL && trim((string) $short) !== '') {
+      $node->setTitle($short);
+    }
+  }
+}
+
+/**
  * Implements hook_form_FORM_ID_alter() for node_access_active_resources_from_cid_edit_form.
  *
  * Makes CiDeR-synced fields readonly so editors can see the data but know to
