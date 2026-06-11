@@ -148,8 +148,7 @@ mappings:
       value: cider_resource_descriptive_name
     settings:
       language: null
-    unique:
-      value: '1'
+    unique: {  }
   -
     target: field_cider_short_name
     map:
@@ -163,7 +162,8 @@ mappings:
       value: cider_resource_id
     settings:
       language: null
-    unique: {  }
+    unique:
+      value: 1
   -
     target: field_access_global_resource_id
     map:
