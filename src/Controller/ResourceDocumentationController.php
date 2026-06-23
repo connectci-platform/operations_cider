@@ -164,9 +164,12 @@ class ResourceDocumentationController extends ControllerBase {
       'queue_specs' => $this->getParagraphData($node, 'field_rp_queue_specs', [
         'field_rp_queue_name' => 'name',
         'field_rp_queue_purpose' => 'purpose',
-        'field_rp_cpus' => 'cpus',
-        'field_rp_gpus' => 'gpus',
-        'field_rp_ram' => 'ram',
+        'field_rp_cpu_count' => 'cpu_count',
+        'field_rp_cpus' => 'cpu_type',
+        'field_rp_gpu_count' => 'gpu_count',
+        'field_rp_gpus' => 'gpu_type',
+        'field_rp_gpu_vram' => 'gpu_vram',
+        'field_rp_vram' => 'ram',
       ]),
       'datasets' => $this->getParagraphData($node, 'field_rp_datasets', [
         'field_rp_dataset_name' => 'name',
