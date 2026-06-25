@@ -156,7 +156,8 @@ class ResourceDocumentationController extends ControllerBase {
       'storage' => $this->getParagraphData($node, 'field_rp_storage', [
         'field_rp_directory' => 'directory',
         'field_rp_fs_path' => 'path',
-        'field_rp_quota' => 'quota',
+        'field_rp_quota_size' => 'quota_size',
+        'field_rp_quota_inode_amount' => 'quota_inode_amount',
         'field_rp_purge' => 'purge',
         'field_rp_backup' => 'backup',
         'field_rp_fs_notes' => 'notes',
@@ -176,6 +177,20 @@ class ResourceDocumentationController extends ControllerBase {
         'field_rp_dataset_description' => 'description',
       ]),
     ];
+
+    // Derived human-readable summaries. The main consumer ingests these into a
+    // semantic database for an LLM; embeddings index prose better than JSON
+    // keys, so a ready-made sentence retrieves better than the consumer
+    // reassembling it from the raw (GB) fields. This is also where the
+    // vram-is-really-RAM naming gets resolved once on our side.
+    foreach ($data['queue_specs'] as &$queue) {
+      $queue['summary'] = $this->buildQueueSummary($queue);
+    }
+    unset($queue);
+    foreach ($data['storage'] as &$row) {
+      $row['summary'] = $this->buildStorageSummary($row);
+    }
+    unset($row);
 
     // Include top software if available.
     $top_software = $node->get('field_rp_top_software')->value;
@@ -359,6 +374,11 @@ class ResourceDocumentationController extends ControllerBase {
           if ($field->getFieldDefinition()->getType() === 'boolean') {
             $row[$key] = (bool) $field->value;
           }
+          elseif ($field->getFieldDefinition()->getType() === 'integer') {
+            // Keep counts/sizes typed so consumers can filter and compute
+            // without re-parsing strings. Sizes stay raw and in GB.
+            $row[$key] = $field->isEmpty() ? NULL : (int) $field->value;
+          }
           elseif ($field->getFieldDefinition()->getType() === 'link') {
             $row[$key] = $field->isEmpty() ? NULL : $field->first()->getUrl()->toString();
           }
@@ -372,6 +392,73 @@ class ResourceDocumentationController extends ControllerBase {
       }
     }
     return $items;
+  }
+
+  /**
+   * Format a GB integer as decimal TB when it divides evenly into 1000 GB.
+   *
+   * Storage capacity convention: 1 TB = 1000 GB. Raw fields stay in GB; only
+   * the derived summary strings use this. Drupal's format_size() expects bytes
+   * and uses binary units, so it can't be reused here.
+   */
+  private function formatGbSize(int $gb): string {
+    if ($gb !== 0 && $gb % 1000 === 0) {
+      return intdiv($gb, 1000) . ' TB';
+    }
+    return $gb . ' GB';
+  }
+
+  /**
+   * Build a human-readable one-line summary of a queue spec.
+   *
+   * E.g. "4 NVIDIA A100 (80 GB vRAM), 64-core AMD EPYC 7763, 256 GB RAM".
+   */
+  private function buildQueueSummary(array $queue): ?string {
+    $parts = [];
+
+    if (!empty($queue['gpu_count'])) {
+      $gpu = (string) $queue['gpu_count'];
+      if (!empty($queue['gpu_type'])) {
+        $gpu .= ' ' . $queue['gpu_type'];
+      }
+      if (!empty($queue['gpu_vram'])) {
+        $gpu .= ' (' . $queue['gpu_vram'] . ' GB vRAM)';
+      }
+      $parts[] = $gpu;
+    }
+
+    if (!empty($queue['cpu_count']) && !empty($queue['cpu_type'])) {
+      $parts[] = $queue['cpu_count'] . '-core ' . $queue['cpu_type'];
+    }
+    elseif (!empty($queue['cpu_type'])) {
+      $parts[] = $queue['cpu_type'];
+    }
+    elseif (!empty($queue['cpu_count'])) {
+      $parts[] = $queue['cpu_count'] . '-core';
+    }
+
+    // field_rp_vram holds node RAM (GB), despite its legacy field name.
+    if (isset($queue['ram']) && $queue['ram'] !== NULL && $queue['ram'] !== '') {
+      $parts[] = $this->formatGbSize((int) $queue['ram']) . ' RAM';
+    }
+
+    return $parts ? implode(', ', $parts) : NULL;
+  }
+
+  /**
+   * Build a human-readable one-line summary of a storage filesystem row.
+   *
+   * E.g. "25 GB, 1,000,000 files".
+   */
+  private function buildStorageSummary(array $row): ?string {
+    $parts = [];
+    if (isset($row['quota_size']) && $row['quota_size'] !== NULL && $row['quota_size'] !== '') {
+      $parts[] = $this->formatGbSize((int) $row['quota_size']);
+    }
+    if (isset($row['quota_inode_amount']) && $row['quota_inode_amount'] !== NULL && $row['quota_inode_amount'] !== '') {
+      $parts[] = number_format((int) $row['quota_inode_amount']) . ' files';
+    }
+    return $parts ? implode(', ', $parts) : NULL;
   }
 
 }
