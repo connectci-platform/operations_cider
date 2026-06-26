@@ -6,6 +6,7 @@ use Drupal\Component\Utility\Html;
 use Drupal\Core\Cache\CacheableJsonResponse;
 use Drupal\Core\Cache\CacheableMetadata;
 use Drupal\Core\Controller\ControllerBase;
+use Drupal\operations_cider\ResourceContentHash;
 use Drupal\operations_cider\Service\ResourceGroupInheritanceService;
 use Symfony\Component\DependencyInjection\ContainerInterface;
 use Symfony\Component\HttpFoundation\JsonResponse;
@@ -76,6 +77,7 @@ class ResourceDocumentationController extends ControllerBase {
         'resource_type' => $node->get('field_cider_resource_type')->value,
         'has_documentation' => !$node->get('field_rp_description')->isEmpty(),
         'url' => $node->toUrl('canonical', ['absolute' => TRUE])->toString(),
+        'last_modified' => date('c', $node->getChangedTime()),
       ];
     }
 
@@ -117,6 +119,8 @@ class ResourceDocumentationController extends ControllerBase {
     $node = clone $node;
     $this->inheritance->applyInheritance($node);
 
+    $changed = $node->getChangedTime();
+
     $data = [
       'nid' => (int) $node->id(),
       'title' => $node->getTitle(),
@@ -128,6 +132,7 @@ class ResourceDocumentationController extends ControllerBase {
       'org_url' => $this->getLinkValue($node, 'field_access_org_url'),
       'status' => $node->get('field_cider_latest_status')->value,
       'url' => $node->toUrl('canonical', ['absolute' => TRUE])->toString(),
+      'last_modified' => date('c', $changed),
       'description' => $node->get('field_rp_description')->value,
       'mfa_required' => (bool) $node->get('field_rp_mfa_required')->value,
       'account_required' => (bool) $node->get('field_rp_account_required')->value,
@@ -202,12 +207,21 @@ class ResourceDocumentationController extends ControllerBase {
       $data['top_software'] = [];
     }
 
-    $response = new CacheableJsonResponse($data);
+    $data['content_hash'] = ResourceContentHash::hash($data);
+
     $cacheability = (new CacheableMetadata())->addCacheableDependency($node);
     if ($group) {
       // Inherited values mean edits to the Group must invalidate this response.
       $cacheability->addCacheableDependency($group);
     }
+
+    $response = new CacheableJsonResponse($data);
+    // ETag/Last-Modified are advisory revalidation hints. content_hash in the
+    // body is the authoritative change signal (a node's changed time can bump
+    // on no-op saves and can be stripped by the page cache layer), so we do not
+    // build literal 304 handling here.
+    $response->headers->set('ETag', '"' . $node->id() . '-' . $changed . '"');
+    $response->headers->set('Last-Modified', gmdate('D, d M Y H:i:s', $changed) . ' GMT');
     $response->addCacheableDependency($cacheability);
     return $response;
   }
