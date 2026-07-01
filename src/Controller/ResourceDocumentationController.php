@@ -170,6 +170,7 @@ class ResourceDocumentationController extends ControllerBase {
       'queue_specs' => $this->getParagraphData($node, 'field_rp_queue_specs', [
         'field_rp_queue_name' => 'name',
         'field_rp_queue_purpose' => 'purpose',
+        'field_rp_node_count' => 'node_count',
         'field_rp_cpu_count' => 'cpu_count',
         'field_rp_cpus' => 'cpu_type',
         'field_rp_gpu_count' => 'gpu_count',
@@ -425,7 +426,7 @@ class ResourceDocumentationController extends ControllerBase {
   /**
    * Build a human-readable one-line summary of a queue spec.
    *
-   * E.g. "4 NVIDIA A100 (80 GB vRAM), 64-core AMD EPYC 7763, 256 GB RAM".
+   * E.g. "4 NVIDIA A100 (80 GB vRAM), 2 nodes, 64-core AMD EPYC 7763, 256 GB RAM".
    */
   private function buildQueueSummary(array $queue): ?string {
     $parts = [];
@@ -439,6 +440,10 @@ class ResourceDocumentationController extends ControllerBase {
         $gpu .= ' (' . $queue['gpu_vram'] . ' GB vRAM)';
       }
       $parts[] = $gpu;
+    }
+
+    if (isset($queue['node_count']) && $queue['node_count'] !== NULL && $queue['node_count'] !== '') {
+      $parts[] = (int) $queue['node_count'] . ' nodes';
     }
 
     if (!empty($queue['cpu_count']) && !empty($queue['cpu_type'])) {
