@@ -132,6 +132,13 @@ function operations_cider_cron() {
     );
   }
 
+  // OOD software enrichment — weekly.
+  $last_ood = $state->get('operations_cider.ood_software_last_run', 0);
+  if (\Drupal::time()->getRequestTime() - $last_ood > 604800) {
+    \Drupal::service('operations_cider.ood_software')->updateAll();
+    $state->set('operations_cider.ood_software_last_run', \Drupal::time()->getRequestTime());
+  }
+
   // SDS availability check — weekly.
   $last_sds = $state->get('operations_cider.sds_availability_last_run', 0);
   if (\Drupal::time()->getRequestTime() - $last_sds > 604800) {

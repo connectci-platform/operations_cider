@@ -2,12 +2,18 @@ services:
   operations_cider.queue_metrics:
     class: \Drupal\operations_cider\Service\QueueMetricsService
     arguments: ['@http_client', '@entity_type.manager', '@logger.factory', '@key.repository']
+  operations_cider.sds_enrichment:
+    class: \Drupal\operations_cider\Service\SdsEnrichmentService
+    arguments: ['@http_client', '@entity_type.manager', '@logger.factory', '@key.repository']
   operations_cider.top_software:
     class: \Drupal\operations_cider\Service\TopSoftwareService
-    arguments: ['@http_client', '@entity_type.manager', '@logger.factory', '@key.repository']
+    arguments: ['@http_client', '@entity_type.manager', '@logger.factory', '@key.repository', '@operations_cider.sds_enrichment']
   operations_cider.sds_availability:
     class: \Drupal\operations_cider\Service\SdsAvailabilityService
     arguments: ['@http_client', '@entity_type.manager', '@logger.factory', '@key.repository', '@state']
+  operations_cider.ood_software:
+    class: \Drupal\operations_cider\Service\OodSoftwareService
+    arguments: ['@entity_type.manager', '@logger.factory', '@operations_cider.sds_enrichment']
   operations_cider.resource_group_inheritance:
     class: \Drupal\operations_cider\Service\ResourceGroupInheritanceService
     arguments: ['@entity_type.manager']
