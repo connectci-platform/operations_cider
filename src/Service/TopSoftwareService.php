@@ -23,11 +23,6 @@ class TopSoftwareService {
   const XDMOD_UI = 'https://xdmod.access-ci.org/controllers/user_interface.php';
 
   /**
-   * SDS ARA API base URL.
-   */
-  const SDS_API_BASE = 'https://sds-ara-api.access-ci.org/api/v1';
-
-  /**
    * Application names to exclude from XDMoD results.
    */
   const EXCLUDED_APPS = [
@@ -39,19 +34,11 @@ class TopSoftwareService {
     'a.out',
   ];
 
-  /**
-   * XDMoD→SDS name mappings for known discrepancies.
-   */
-  const NAME_ALIASES = [
-    'q-espresso' => ['quantum-espresso', 'quantum_espresso'],
-    'ncbi-blast' => ['blast-plus', 'blast+'],
-    'r' => ['r-base', 'r-project'],
-  ];
-
   protected ClientInterface $httpClient;
   protected EntityTypeManagerInterface $entityTypeManager;
   protected $logger;
   protected KeyRepositoryInterface $keyRepository;
+  protected SdsEnrichmentService $sds;
 
   /**
    * Constructs a TopSoftwareService.
@@ -61,11 +48,13 @@ class TopSoftwareService {
     EntityTypeManagerInterface $entity_type_manager,
     LoggerChannelFactoryInterface $logger_factory,
     KeyRepositoryInterface $key_repository,
+    SdsEnrichmentService $sds,
   ) {
     $this->httpClient = $http_client;
     $this->entityTypeManager = $entity_type_manager;
     $this->logger = $logger_factory->get('operations_cider');
     $this->keyRepository = $key_repository;
+    $this->sds = $sds;
   }
 
   /**
@@ -113,13 +102,13 @@ class TopSoftwareService {
           ->get('field_access_global_resource_id')->value;
         $sds_catalog = [];
         if ($global_id) {
-          $sds_catalog = $this->fetchSdsCatalog($global_id, $sds_key);
+          $sds_catalog = $this->sds->fetchCatalogByResource($global_id);
         }
         // Fall back to name-based SDS lookup for any apps not found.
         $unenriched = array_filter($ranked, fn($e) => empty($e['description']));
         if (!empty($unenriched)) {
           $names = array_column($unenriched, 'name');
-          $name_catalog = $this->fetchSdsByNames($names, $sds_key);
+          $name_catalog = $this->sds->fetchCatalogByNames($names);
           $sds_catalog = array_merge($name_catalog, $sds_catalog);
         }
         $ranked = $this->enrichWithSds($ranked, $sds_catalog);
@@ -235,109 +224,6 @@ class TopSoftwareService {
   }
 
   /**
-   * Fetch the full SDS software catalog for a resource.
-   *
-   * @param string $global_resource_id
-   *   The CiDeR global resource ID (e.g., "anvil.purdue.access-ci.org").
-   * @param string $api_key
-   *   The SDS API key.
-   *
-   * @return array
-   *   SDS catalog keyed by lowercase software_name.
-   */
-  protected function fetchSdsCatalog(string $global_resource_id, string $api_key): array {
-    try {
-      $response = $this->httpClient->request('POST', self::SDS_API_BASE, [
-        'headers' => [
-          'Accept' => 'application/json',
-          'Content-Type' => 'application/json',
-          'x-api-key' => $api_key,
-        ],
-        'json' => [
-          'rps' => [$global_resource_id],
-        ],
-        'timeout' => 30,
-      ]);
-      $body = json_decode((string) $response->getBody(), TRUE);
-    }
-    catch (GuzzleException $e) {
-      // 404 just means SDS has no data for this resource — not an error.
-      if ($e->getCode() !== 404) {
-        $this->logger->warning(
-          'SDS API request failed for @resource: @message',
-          ['@resource' => $global_resource_id, '@message' => $e->getMessage()]
-        );
-      }
-      return [];
-    }
-
-    // Index by lowercase name for case-insensitive lookup.
-    $catalog = [];
-    foreach ($body['data'] ?? [] as $item) {
-      $name = strtolower($item['software_name'] ?? '');
-      if ($name) {
-        $catalog[$name] = $item;
-      }
-    }
-    return $catalog;
-  }
-
-  /**
-   * Fetch SDS metadata by software names (not resource-specific).
-   *
-   * @param array $names
-   *   Array of software names to look up.
-   * @param string $api_key
-   *   The SDS API key.
-   *
-   * @return array
-   *   SDS catalog keyed by lowercase software_name.
-   */
-  protected function fetchSdsByNames(array $names, string $api_key): array {
-    // Also include known aliases in the query.
-    $query_names = $names;
-    foreach ($names as $name) {
-      $lower = strtolower($name);
-      if (isset(self::NAME_ALIASES[$lower])) {
-        $query_names = array_merge($query_names, self::NAME_ALIASES[$lower]);
-      }
-    }
-
-    try {
-      $response = $this->httpClient->request('POST', self::SDS_API_BASE, [
-        'headers' => [
-          'Accept' => 'application/json',
-          'Content-Type' => 'application/json',
-          'x-api-key' => $api_key,
-        ],
-        'json' => [
-          'software' => array_values(array_unique($query_names)),
-        ],
-        'timeout' => 30,
-      ]);
-      $body = json_decode((string) $response->getBody(), TRUE);
-    }
-    catch (GuzzleException $e) {
-      if ($e->getCode() !== 404) {
-        $this->logger->warning(
-          'SDS name-based query failed: @message',
-          ['@message' => $e->getMessage()]
-        );
-      }
-      return [];
-    }
-
-    $catalog = [];
-    foreach ($body['data'] ?? [] as $item) {
-      $name = strtolower($item['software_name'] ?? '');
-      if ($name) {
-        $catalog[$name] = $item;
-      }
-    }
-    return $catalog;
-  }
-
-  /**
    * Enrich XDMoD-ranked software list with SDS metadata.
    *
    * @param array $ranked
@@ -350,50 +236,12 @@ class TopSoftwareService {
    */
   protected function enrichWithSds(array $ranked, array $sds_catalog): array {
     foreach ($ranked as &$entry) {
-      $sds_entry = $this->findInSds($entry['name'], $sds_catalog);
-      if ($sds_entry) {
-        $entry['description'] = $sds_entry['ai_description']
-          ?: $sds_entry['software_description']
-          ?: '';
-        $entry['research_field'] = $sds_entry['ai_research_field'] ?? '';
-        $entry['web_page'] = $sds_entry['software_web_page'] ?? '';
-        $entry['documentation'] = $sds_entry['software_documentation'] ?? '';
+      $hit = $this->sds->findInSds($entry['name'], $sds_catalog);
+      if ($hit) {
+        $entry = array_merge($entry, $this->sds->mapSdsFields($hit));
       }
     }
     return $ranked;
-  }
-
-  /**
-   * Look up an XDMoD app name in the SDS catalog.
-   *
-   * Tries exact match, then known aliases, then substring matching.
-   */
-  protected function findInSds(string $xdmod_name, array $sds_catalog): ?array {
-    $lower = strtolower($xdmod_name);
-
-    // Exact match.
-    if (isset($sds_catalog[$lower])) {
-      return $sds_catalog[$lower];
-    }
-
-    // Check known aliases.
-    if (isset(self::NAME_ALIASES[$lower])) {
-      foreach (self::NAME_ALIASES[$lower] as $alias) {
-        if (isset($sds_catalog[$alias])) {
-          return $sds_catalog[$alias];
-        }
-      }
-    }
-
-    // Try matching with hyphens/underscores normalized.
-    $normalized = str_replace(['-', '_'], '', $lower);
-    foreach ($sds_catalog as $sds_name => $sds_entry) {
-      if (str_replace(['-', '_'], '', $sds_name) === $normalized) {
-        return $sds_entry;
-      }
-    }
-
-    return NULL;
   }
 
   /**

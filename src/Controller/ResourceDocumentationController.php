@@ -7,6 +7,7 @@ use Drupal\Core\Cache\CacheableJsonResponse;
 use Drupal\Core\Cache\CacheableMetadata;
 use Drupal\Core\Controller\ControllerBase;
 use Drupal\operations_cider\ResourceContentHash;
+use Drupal\operations_cider\Service\OodSoftwareService;
 use Drupal\operations_cider\Service\ResourceGroupInheritanceService;
 use Symfony\Component\DependencyInjection\ContainerInterface;
 use Symfony\Component\HttpFoundation\JsonResponse;
@@ -21,17 +22,37 @@ use Symfony\Component\HttpFoundation\Request;
 class ResourceDocumentationController extends ControllerBase {
 
   /**
+   * The resource group inheritance service.
+   *
    * @var \Drupal\operations_cider\Service\ResourceGroupInheritanceService
    */
   protected ResourceGroupInheritanceService $inheritance;
 
-  public function __construct(ResourceGroupInheritanceService $inheritance) {
+  /**
+   * The OOD software service.
+   *
+   * @var \Drupal\operations_cider\Service\OodSoftwareService
+   */
+  protected OodSoftwareService $oodSoftware;
+
+  /**
+   * Constructs a ResourceDocumentationController.
+   */
+  public function __construct(
+    ResourceGroupInheritanceService $inheritance,
+    OodSoftwareService $ood_software,
+  ) {
     $this->inheritance = $inheritance;
+    $this->oodSoftware = $ood_software;
   }
 
+  /**
+   * {@inheritdoc}
+   */
   public static function create(ContainerInterface $container): self {
     return new self(
       $container->get('operations_cider.resource_group_inheritance'),
+      $container->get('operations_cider.ood_software'),
     );
   }
 
@@ -177,12 +198,21 @@ class ResourceDocumentationController extends ControllerBase {
         'field_rp_gpus' => 'gpu_type',
         'field_rp_gpu_vram' => 'gpu_vram',
         'field_rp_vram' => 'ram',
+        'field_rp_max_wall_time' => 'max_wall_time_hours',
       ]),
       'datasets' => $this->getParagraphData($node, 'field_rp_datasets', [
         'field_rp_dataset_name' => 'name',
         'field_rp_dataset_description' => 'description',
       ]),
     ];
+
+    // Normalise and derive the wall-time pair for each queue spec.
+    foreach ($data['queue_specs'] as &$q) {
+      $hours = $q['max_wall_time_hours'] ?? NULL;
+      $q['max_wall_time_hours'] = ($hours === NULL || $hours === '') ? NULL : (int) $hours;
+      $q['max_wall_time_display'] = $this->wallTimeDisplay($q['max_wall_time_hours']);
+    }
+    unset($q);
 
     // Derived human-readable summaries. The main consumer ingests these into a
     // semantic database for an LLM; embeddings index prose better than JSON
@@ -207,6 +237,17 @@ class ResourceDocumentationController extends ControllerBase {
     else {
       $data['top_software'] = [];
     }
+
+    // OOD software (same shape as top_software; sorted by job_count when set).
+    // updateAll() pre-enriches and pre-sorts on cron (weekly throttle); the
+    // controller sorts again at read time so the API is consistent immediately
+    // even before cron runs. Consequence, same as top_software: a resource
+    // whose OOD entries were just added shows them unsorted-by-usage and
+    // unenriched until the next cron run — acceptable and matches the
+    // established pattern.
+    $ood_raw = $node->get('field_rp_ood_software')->value;
+    $ood = $ood_raw ? json_decode($ood_raw, TRUE) : [];
+    $data['ood_software'] = $this->oodSoftware->sortEntries(is_array($ood) ? $ood : []);
 
     $data['content_hash'] = ResourceContentHash::hash($data);
 
@@ -483,6 +524,16 @@ class ResourceDocumentationController extends ControllerBase {
       $parts[] = number_format((int) $row['quota_inode_amount']) . ' files';
     }
     return $parts ? implode(', ', $parts) : NULL;
+  }
+
+  /**
+   * Human-readable duration for a whole-hours wall-time limit.
+   */
+  private function wallTimeDisplay(?int $hours): ?string {
+    if ($hours === NULL || $hours <= 0) {
+      return NULL;
+    }
+    return $hours . ' ' . ($hours === 1 ? 'hour' : 'hours');
   }
 
 }
