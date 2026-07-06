@@ -431,15 +431,20 @@ class ResourceDocumentationController extends ControllerBase {
   private function buildQueueSummary(array $queue): ?string {
     $parts = [];
 
-    if (!empty($queue['gpu_count'])) {
-      $gpu = (string) $queue['gpu_count'];
+    // Render GPU type/vRAM even when the per-node count is absent; the count
+    // is an optional prefix.
+    if (!empty($queue['gpu_count']) || !empty($queue['gpu_type']) || !empty($queue['gpu_vram'])) {
+      $gpu = '';
+      if (!empty($queue['gpu_count'])) {
+        $gpu = (string) $queue['gpu_count'];
+      }
       if (!empty($queue['gpu_type'])) {
-        $gpu .= ' ' . $queue['gpu_type'];
+        $gpu = $gpu === '' ? $queue['gpu_type'] : $gpu . ' ' . $queue['gpu_type'];
       }
       if (!empty($queue['gpu_vram'])) {
         $gpu .= ' (' . $queue['gpu_vram'] . ' GB vRAM)';
       }
-      $parts[] = $gpu;
+      $parts[] = trim($gpu);
     }
 
     if (isset($queue['node_count']) && $queue['node_count'] !== NULL && $queue['node_count'] !== '') {
