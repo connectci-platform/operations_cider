@@ -161,6 +161,8 @@ class ResourceDocumentationController extends ControllerBase {
       'office_hours' => $this->getLinkValue($node, 'field_rp_office_hours'),
       'login_text' => $this->getScalarValue($node, 'field_rp_login_text'),
       'file_transfer_text' => $this->getScalarValue($node, 'field_rp_file_transfer_text'),
+      'storage_text' => $this->getScalarValue($node, 'field_rp_storage_text'),
+      'datasets_text' => $this->getScalarValue($node, 'field_rp_datasets_text'),
       'jobs_info' => $this->getScalarValue($node, 'field_rp_jobs_info'),
       'software_list_url' => $this->getLinkValue($node, 'field_rp_software_list_url'),
       'external_storage' => $this->getScalarValue($node, 'field_rp_external_storage'),
