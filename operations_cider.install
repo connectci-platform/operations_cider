@@ -104,6 +104,32 @@ function operations_cider_update_9001(array &$sandbox): string {
 }
 
 /**
+ * Convert field_rp_max_wall_time from whole hours to whole minutes.
+ *
+ * Queues can have sub-hour wall-time limits (e.g. one of the Expanse debug
+ * queues is 30 minutes), which whole hours can't represent. Rather than change
+ * the field storage to a float, we keep it an integer and switch the unit from
+ * hours to minutes. Existing values were entered in hours, so multiply them by
+ * 60 in both the field data and revision tables.
+ */
+function operations_cider_update_9002(): string {
+  $database = \Drupal::database();
+  $updated = 0;
+
+  foreach (['paragraph__field_rp_max_wall_time', 'paragraph_revision__field_rp_max_wall_time'] as $table) {
+    if (!$database->schema()->tableExists($table)) {
+      continue;
+    }
+    $updated += $database->update($table)
+      ->expression('field_rp_max_wall_time_value', 'field_rp_max_wall_time_value * 60')
+      ->isNotNull('field_rp_max_wall_time_value')
+      ->execute();
+  }
+
+  return sprintf('Converted %d field_rp_max_wall_time row(s) from hours to minutes.', $updated);
+}
+
+/**
  * Parse a legacy field_rp_ssh_url value into structured components.
  *
  * Handles these patterns observed in production data:
