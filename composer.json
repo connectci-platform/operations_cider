@@ -1,5 +1,8 @@
 {
     "name": "connectci/operations_cider",
+    "replace": {
+        "access/operations_cider": "self.version"
+    },
     "version": "0.1.0",
     "description": "Drupal Feed of ACCESS Integrated Resources",
     "type": "drupal-custom-module",
@@ -21,8 +24,8 @@
     "minimum-stability": "dev",
     "repositories": [
         {
-        "type": "composer",
-        "url": "https://packages.drupal.org/8"
+            "type": "composer",
+            "url": "https://packages.drupal.org/8"
         }
     ],
     "require": {
