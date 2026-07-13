@@ -1,5 +1,5 @@
 {
-    "name": "access/operations_cider",
+    "name": "connectci/operations_cider",
     "version": "0.1.0",
     "description": "Drupal Feed of ACCESS Integrated Resources",
     "type": "drupal-custom-module",
@@ -15,8 +15,8 @@
         }
     ],
     "support": {
-        "issues": "https://github.com/access-ci-org/Operations_Drupal_Feed_Cider/issues",
-        "source": "https://github.com/access-ci-org/Operations_Drupal_Feed_Cider"
+        "issues": "https://github.com/connectci-platform/operations_cider/issues",
+        "source": "https://github.com/connectci-platform/operations_cider"
     },
     "minimum-stability": "dev",
     "repositories": [
