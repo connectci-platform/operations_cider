@@ -161,6 +161,8 @@ class ResourceDocumentationController extends ControllerBase {
       'office_hours' => $this->getLinkValue($node, 'field_rp_office_hours'),
       'login_text' => $this->getScalarValue($node, 'field_rp_login_text'),
       'file_transfer_text' => $this->getScalarValue($node, 'field_rp_file_transfer_text'),
+      'storage_text' => $this->getScalarValue($node, 'field_rp_storage_text'),
+      'datasets_text' => $this->getScalarValue($node, 'field_rp_datasets_text'),
       'jobs_info' => $this->getScalarValue($node, 'field_rp_jobs_info'),
       'software_list_url' => $this->getLinkValue($node, 'field_rp_software_list_url'),
       'external_storage' => $this->getScalarValue($node, 'field_rp_external_storage'),
@@ -198,7 +200,7 @@ class ResourceDocumentationController extends ControllerBase {
         'field_rp_gpus' => 'gpu_type',
         'field_rp_gpu_vram' => 'gpu_vram',
         'field_rp_vram' => 'ram',
-        'field_rp_max_wall_time' => 'max_wall_time_hours',
+        'field_rp_max_wall_time' => 'max_wall_time_minutes',
       ]),
       'datasets' => $this->getParagraphData($node, 'field_rp_datasets', [
         'field_rp_dataset_name' => 'name',
@@ -206,11 +208,16 @@ class ResourceDocumentationController extends ControllerBase {
       ]),
     ];
 
-    // Normalise and derive the wall-time pair for each queue spec.
+    // Normalise and derive the wall-time pair for each queue spec. The field
+    // stores whole minutes; for backwards compatibility we still expose
+    // max_wall_time_hours (now possibly fractional, e.g. 0.5 for a 30-minute
+    // queue) alongside a human-readable display string.
     foreach ($data['queue_specs'] as &$q) {
-      $hours = $q['max_wall_time_hours'] ?? NULL;
-      $q['max_wall_time_hours'] = ($hours === NULL || $hours === '') ? NULL : (int) $hours;
-      $q['max_wall_time_display'] = $this->wallTimeDisplay($q['max_wall_time_hours']);
+      $minutes = $q['max_wall_time_minutes'] ?? NULL;
+      unset($q['max_wall_time_minutes']);
+      $minutes = ($minutes === NULL || $minutes === '') ? NULL : (int) $minutes;
+      $q['max_wall_time_hours'] = $minutes === NULL ? NULL : $minutes / 60;
+      $q['max_wall_time_display'] = $this->wallTimeDisplay($minutes);
     }
     unset($q);
 
@@ -527,13 +534,24 @@ class ResourceDocumentationController extends ControllerBase {
   }
 
   /**
-   * Human-readable duration for a whole-hours wall-time limit.
+   * Human-readable duration for a wall-time limit stored in whole minutes.
+   *
+   * E.g. 30 => "30 minutes", 2880 => "48 hours", 90 => "1 hour 30 minutes".
    */
-  private function wallTimeDisplay(?int $hours): ?string {
-    if ($hours === NULL || $hours <= 0) {
+  private function wallTimeDisplay(?int $minutes): ?string {
+    if ($minutes === NULL || $minutes <= 0) {
       return NULL;
     }
-    return $hours . ' ' . ($hours === 1 ? 'hour' : 'hours');
+    $hours = intdiv($minutes, 60);
+    $mins = $minutes % 60;
+    $parts = [];
+    if ($hours > 0) {
+      $parts[] = $hours . ' ' . ($hours === 1 ? 'hour' : 'hours');
+    }
+    if ($mins > 0) {
+      $parts[] = $mins . ' ' . ($mins === 1 ? 'minute' : 'minutes');
+    }
+    return implode(' ', $parts);
   }
 
 }
