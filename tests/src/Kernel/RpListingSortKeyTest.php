@@ -11,12 +11,12 @@ use Drupal\field\Entity\FieldConfig;
 /**
  * Tests the /rp-documentation listing sort key.
  *
- * The listing's rows are resource groups rendered as their member resources'
- * short names, so the view's SQL sort cannot match the displayed order;
+ * The view's configured sort is NULL for every resource_group row and no
+ * single column holds a resource row's resolved label, so
  * operations_cider_views_pre_render() re-orders rows by
  * operations_cider_rp_listing_sort_key(). This locks the key resolution:
- * a group sorts by its alphabetically first member's resolved name, a
- * resource by its own short name, with label() fallbacks throughout.
+ * every row sorts by its displayed heading — the group title, or a
+ * resource's label() (display name, short name, title).
  *
  * @group operations_cider
  */
@@ -82,36 +82,25 @@ class RpListingSortKeyTest extends KernelTestBase {
     return $node;
   }
 
-  public function testResourceSortsByShortName(): void {
+  public function testResourceSortsByResolvedLabel(): void {
+    // The bundle class resolves label() to the CiDeR short name, which is
+    // what the listing heading shows for a resource row.
     $node = $this->makeResource('Long CiDeR Descriptive Title', 'Sage');
     $this->assertSame('Sage', operations_cider_rp_listing_sort_key($node));
   }
 
-  public function testResourceFallsBackToLabel(): void {
+  public function testResourceWithoutShortNameSortsByTitle(): void {
     $node = $this->makeResource('Bare Resource', NULL);
     $this->assertSame('Bare Resource', operations_cider_rp_listing_sort_key($node));
   }
 
-  public function testGroupSortsByFirstMemberAlphabetically(): void {
-    // Delta order deliberately reversed from alphabetical order: the key must
-    // come from the alphabetically first member, not delta 0. "OSG" showing
-    // "OSPool" is the motivating case: the group's own title is irrelevant.
-    $b = $this->makeResource('Title B', 'TAMU Launch');
-    $a = $this->makeResource('Title A', 'PSC Neocortex CS');
-    $group = $this->makeGroup('OSG', [$b, $a]);
-    $this->assertSame('PSC Neocortex CS', operations_cider_rp_listing_sort_key($group));
-  }
-
-  public function testGroupMemberWithoutShortNameUsesLabel(): void {
-    $m = $this->makeResource('Aardvark Cluster', NULL);
-    $z = $this->makeResource('T', 'Zebra');
-    $group = $this->makeGroup('Group', [$z, $m]);
-    $this->assertSame('Aardvark Cluster', operations_cider_rp_listing_sort_key($group));
-  }
-
-  public function testEmptyGroupFallsBackToOwnLabel(): void {
-    $group = $this->makeGroup('Lonely Group', []);
-    $this->assertSame('Lonely Group', operations_cider_rp_listing_sort_key($group));
+  public function testGroupSortsByItsOwnTitleNotItsMembers(): void {
+    // The group heading is the group title; members render beneath it, so a
+    // group titled "Test Resource Group" belongs under T even though its
+    // first member is "Alpha".
+    $alpha = $this->makeResource('Test Resource Alpha', 'Alpha');
+    $group = $this->makeGroup('Test Resource Group', [$alpha]);
+    $this->assertSame('Test Resource Group', operations_cider_rp_listing_sort_key($group));
   }
 
   public function testNullRowYieldsEmptyKey(): void {
