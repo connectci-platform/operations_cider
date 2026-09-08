@@ -351,6 +351,66 @@ function operations_cider_inheritable_boolean_submit(array &$form, FormStateInte
 }
 
 /**
+ * Implements hook_views_pre_render().
+ *
+ * Sorts the /rp-documentation listing by what each row actually displays.
+ * A row of this view is a resource_group, but the theme renders it as its
+ * member resources' resolved short names — so no SQL sort on a row-level
+ * column (group title, short name) can match the rendered order, and the
+ * view's configured sort key is NULL for every group anyway. Re-order the
+ * results by each row's effective displayed name instead. Render-time
+ * sorting is per-page; the pager allows 50 rows and the listing holds ~22,
+ * so a single page covers it — raise items_per_page before this ever pages.
+ */
+function operations_cider_views_pre_render(\Drupal\views\ViewExecutable $view) {
+  if ($view->id() !== 'rp_documentation_index') {
+    return;
+  }
+  usort($view->result, function ($a, $b) {
+    return strcasecmp(
+      operations_cider_rp_listing_sort_key($a->_entity ?? NULL),
+      operations_cider_rp_listing_sort_key($b->_entity ?? NULL)
+    );
+  });
+  foreach ($view->result as $index => $row) {
+    $row->index = $index;
+  }
+}
+
+/**
+ * Sort key for a /rp-documentation listing row: its displayed name.
+ *
+ * Mirrors the theme preprocess that renders the rows: a resource shows its
+ * CiDeR short name, falling back to label() (which itself resolves the
+ * display-name override); a group shows its member resources, so it sorts by
+ * the alphabetically first member's resolved name. Groups without members
+ * and rows without an entity fall back to the label / empty string.
+ */
+function operations_cider_rp_listing_sort_key(?\Drupal\node\NodeInterface $node): string {
+  if (!$node) {
+    return '';
+  }
+  $resolve = function ($n) {
+    $short = $n->hasField('field_cider_short_name') && !$n->get('field_cider_short_name')->isEmpty()
+      ? trim((string) $n->get('field_cider_short_name')->value)
+      : '';
+    return $short !== '' ? $short : (string) $n->label();
+  };
+  if ($node->bundle() === 'resource_group' && $node->hasField('field_cider_resources')) {
+    $names = [];
+    foreach ($node->get('field_cider_resources')->referencedEntities() as $member) {
+      $names[] = $resolve($member);
+    }
+    if ($names) {
+      usort($names, 'strcasecmp');
+      return $names[0];
+    }
+    return (string) $node->label();
+  }
+  return $resolve($node);
+}
+
+/**
  * Resolves the display name for a CiDeR resource node.
  *
  * Precedence: editor override (field_rp_display_name), then the CiDeR short
