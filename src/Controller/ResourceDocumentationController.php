@@ -22,6 +22,25 @@ use Symfony\Component\HttpFoundation\Request;
 class ResourceDocumentationController extends ControllerBase {
 
   /**
+   * Section key => inheritable link field backing the page's "Documentation"
+   * link for that section. Order here is the order in the payload.
+   */
+  private const DOCUMENTATION_LINK_FIELDS = [
+    'login' => 'field_rp_login_to_anvil_gpu_link',
+    'ssh_login' => 'field_rp_ssh_login_link',
+    'ondemand_login' => 'field_rp_access_ood_login_link',
+    'submitting_jobs' => 'field_rp_submitting_jobs',
+    'queue_specs' => 'field_rp_queue_spec_link',
+    'software' => 'field_rp_software_link',
+    'top_software' => 'field_rp_freq_used_software_link',
+    'storage' => 'field_rp_storage_link',
+    'file_system' => 'field_rp_file_system_link',
+    'external_storage' => 'field_rp_external_storage_link',
+    'file_transfer' => 'field_rp_file_transfer_link',
+    'datasets' => 'field_rp_datasets_link',
+  ];
+
+  /**
    * The resource group inheritance service.
    *
    * @var \Drupal\operations_cider\Service\ResourceGroupInheritanceService
@@ -212,6 +231,15 @@ class ResourceDocumentationController extends ControllerBase {
       ]),
     ];
 
+    // Per-section documentation links. These are the twelve inheritable link
+    // fields the page renders as a "Documentation" link on each section.
+    // applyInheritance() has already run, so getLinkValue() returns a value the
+    // group supplied when the resource itself has none.
+    $data['documentation_links'] = [];
+    foreach (self::DOCUMENTATION_LINK_FIELDS as $key => $field) {
+      $data['documentation_links'][$key] = $this->getLinkValue($node, $field);
+    }
+
     // Normalise and derive the wall-time pair for each queue spec. The field
     // stores whole minutes; for backwards compatibility we still expose
     // max_wall_time_hours (now possibly fractional, e.g. 0.5 for a 30-minute
@@ -238,6 +266,28 @@ class ResourceDocumentationController extends ControllerBase {
       $row['summary'] = $this->buildStorageSummary($row);
     }
     unset($row);
+
+    // XDMoD metrics, keyed by queue name in their own object rather than
+    // attached to each queue_specs row.
+    //
+    // The rows are one per queue-and-hardware pair while XDMoD measures per
+    // queue, so a queue offered on two hardware configurations is several rows
+    // sharing one measurement. Attaching per row repeats it: Bridges-2 GPU has
+    // ten rows under three names, so the same figures would appear five times
+    // and read as five independently-measured queues. QueueSpecGrouper exists
+    // to collapse exactly that for the page; this keeps the API honest the
+    // same way, without changing the shape of queue_specs that consumers
+    // already read. Join on the row's `name`.
+    //
+    // Refreshed nightly and therefore excluded from the content hash — see
+    // ResourceContentHash::STRIP_TOP_LEVEL.
+    $metrics = $this->decodeQueueMetrics($node);
+    $data['queue_metrics_updated'] = $metrics['updated'];
+    // Cast so an empty map encodes as {} rather than []. PHP renders an empty
+    // array as a JSON list, and most resources have no metrics at all, so
+    // without this the common case contradicts the documented object type and
+    // breaks a client generated from the spec.
+    $data['queue_metrics'] = (object) $metrics['queues'];
 
     // Include top software if available.
     $top_software = $node->get('field_rp_top_software')->value;
@@ -389,6 +439,30 @@ class ResourceDocumentationController extends ControllerBase {
   }
 
   /**
+   * Decode field_rp_queue_metrics into its updated date and per-queue map.
+   *
+   * Returns nulls and an empty map for missing, empty, or malformed JSON, so a
+   * bad blob degrades to "no metrics" rather than breaking the payload.
+   *
+   * @return array{updated: string|null, queues: array}
+   */
+  private function decodeQueueMetrics($node): array {
+    if (!$node->hasField('field_rp_queue_metrics')) {
+      return ['updated' => NULL, 'queues' => []];
+    }
+    $raw = $node->get('field_rp_queue_metrics')->value;
+    $decoded = $raw ? json_decode($raw, TRUE) : NULL;
+    if (!is_array($decoded)) {
+      return ['updated' => NULL, 'queues' => []];
+    }
+    $queues = $decoded['queues'] ?? NULL;
+    return [
+      'updated' => $decoded['updated'] ?? NULL,
+      'queues' => is_array($queues) ? $queues : [],
+    ];
+  }
+
+  /**
    * Extract a single link field value.
    */
   private function getLinkValue($node, string $field_name): ?string {
@@ -396,7 +470,19 @@ class ResourceDocumentationController extends ControllerBase {
       return NULL;
     }
     $value = $node->get($field_name)->first();
-    return $value ? $value->getUrl()->toString() : NULL;
+    if (!$value) {
+      return NULL;
+    }
+    try {
+      return $value->getUrl()->toString();
+    }
+    catch (\Exception $e) {
+      // Url::fromUri() throws on a malformed or scheme-less stored URI. The
+      // widget validates on save, so this only bites legacy or imported rows —
+      // but there are now twelve more call sites, and one bad row must not 500
+      // the whole resource. Mirrors getMultiLinkValues()'s fallback.
+      return $value->uri ?: NULL;
+    }
   }
 
   /**

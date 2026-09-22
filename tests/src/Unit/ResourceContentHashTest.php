@@ -32,6 +32,79 @@ class ResourceContentHashTest extends UnitTestCase {
     $this->assertNotSame(ResourceContentHash::hash($a), ResourceContentHash::hash($b));
   }
 
+  /**
+   * A metrics-free payload must keep hashing to the same literal value.
+   *
+   * The nested metrics strip must be inert for payloads that carry no metrics,
+   * because a change there would silently invalidate every stored fingerprint
+   * and make consumers re-ingest a corpus that did not change. A literal
+   * expected value is the point: it survives refactors of the strip logic in a
+   * way a self-comparison cannot.
+   */
+  public function testMetricsFreePayloadHashIsStable(): void {
+    $payload = [
+      'title' => 'Test Resource Alpha',
+      'description' => 'A resource.',
+      'queue_specs' => [
+        ['name' => 'gpu', 'max_nodes' => 4],
+        ['name' => 'cpu', 'max_nodes' => 8],
+      ],
+      'storage' => [['directory' => 'Home', 'quota_size' => 50]],
+      'last_modified' => '2026-09-21T00:00:00+00:00',
+      'url' => 'https://host/resource/1',
+    ];
+    $this->assertSame(
+      '53809a078d4862c34b29dbf710d7a9cb56af6780ab37360ccb39948649a01ee6',
+      ResourceContentHash::hash($payload),
+      'The fingerprint of a metrics-free payload changed. This value was taken '
+      . 'from the code as it stood before queue metrics existed, so a failure '
+      . 'here means every stored fingerprint just became stale and every '
+      . 'consumer will re-ingest once.'
+    );
+  }
+
+  /** Nightly queue metrics must NOT churn the hash. */
+  public function testQueueMetricsAreNotHashed(): void {
+    $monday = [
+      'title' => 'X',
+      'queue_metrics_updated' => '2026-09-20',
+      'queue_metrics' => ['gpu' => ['job_count' => 100, 'wait_time' => 3.5]],
+    ];
+    $tuesday = [
+      'title' => 'X',
+      'queue_metrics_updated' => '2026-09-21',
+      'queue_metrics' => ['gpu' => ['job_count' => 212, 'wait_time' => 9.1]],
+    ];
+    $this->assertSame(ResourceContentHash::hash($monday), ResourceContentHash::hash($tuesday));
+  }
+
+  /** Stripping the metrics object must not take the queue specs with it. */
+  public function testQueueSpecContentIsStillHashed(): void {
+    $a = [
+      'queue_specs' => [['name' => 'gpu', 'max_nodes' => 4]],
+      'queue_metrics' => ['gpu' => ['job_count' => 1]],
+    ];
+    $b = [
+      'queue_specs' => [['name' => 'gpu', 'max_nodes' => 8]],
+      'queue_metrics' => ['gpu' => ['job_count' => 1]],
+    ];
+    $this->assertNotSame(ResourceContentHash::hash($a), ResourceContentHash::hash($b));
+  }
+
+  /**
+   * Nested content objects are hashed, so documentation links reach the digest.
+   *
+   * Named for what this can actually prove: the hash treats an unlisted nested
+   * object as content. That documentation_links IS such an object is the
+   * controller's doing, and the kernel test covers that half — this class has
+   * no knowledge of the key, so a test here cannot pin the feature's existence.
+   */
+  public function testNestedContentObjectsAreHashed(): void {
+    $a = ['documentation_links' => ['ssh_login' => 'https://example.edu/ssh', 'software' => NULL]];
+    $b = ['documentation_links' => ['ssh_login' => 'https://example.edu/ssh-v2', 'software' => NULL]];
+    $this->assertNotSame(ResourceContentHash::hash($a), ResourceContentHash::hash($b));
+  }
+
   /** Content changes MUST change the hash (positive). */
   public function testHashReflectsContentFields(): void {
     $base = ['title' => 'X', 'description' => 'D', 'storage' => [['directory' => 'Home']]];
