@@ -17,15 +17,19 @@ final class ResourceContentHash {
   /**
    * Top-level keys excluded from the fingerprint.
    *
-   * Only `url` is stripped: it is the node's canonical URL built with
+   * `url` is the node's canonical URL built with
    * `absolute => TRUE` (getResource() line ~130) and therefore varies by serving
    * host. The other URL-ish fields (`org_url`, `ondemand_url`, `office_hours`,
    * `software_list_url`, `account_setup_url`) come from getLinkValue() WITHOUT
    * the absolute flag — they are stored/external or host-relative and stable, so
    * they stay in the hash as content. `last_modified` is the timestamp we
-   * explicitly want excluded.
+   * explicitly want excluded. `queue_metrics` holds XDMoD wait/wall figures
+   * refreshed nightly, and `queue_metrics_updated` is the date of that refresh;
+   * both move when nothing a consumer would call a content change has happened,
+   * so leaving them in would churn the fingerprint daily and defeat the change
+   * detection it exists for.
    */
-  private const STRIP_TOP_LEVEL = ['last_modified', 'url'];
+  private const STRIP_TOP_LEVEL = ['last_modified', 'url', 'queue_metrics', 'queue_metrics_updated'];
 
   /**
    * Multi-value link-list fields whose entries carry a host-absolute `url`
