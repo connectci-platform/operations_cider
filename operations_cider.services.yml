@@ -20,3 +20,8 @@ services:
   operations_cider.resource_group_inheritance:
     class: \Drupal\operations_cider\Service\ResourceGroupInheritanceService
     arguments: ['@entity_type.manager']
+  operations_cider.xdmod_alert:
+    class: \Drupal\operations_cider\Service\XdmodAlertNotifier
+    # email_factory is optional so the container compiles where symfony_mailer
+    # is not enabled (kernel tests of unrelated services).
+    arguments: ['@?email_factory', '@entity_type.manager', '@logger.factory', '@state', '@datetime.time', '@cache_tags.invalidator']

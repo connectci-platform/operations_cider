@@ -6,3 +6,4 @@ package: Custom
 dependencies:
   - drupal:feeds
   - drupal:feeds_ex
+  - symfony_mailer:symfony_mailer

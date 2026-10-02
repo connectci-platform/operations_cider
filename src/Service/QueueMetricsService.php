@@ -5,8 +5,11 @@ namespace Drupal\operations_cider\Service;
 use Drupal\Core\Entity\EntityTypeManagerInterface;
 use Drupal\Core\Logger\LoggerChannelFactoryInterface;
 use Drupal\key\KeyRepositoryInterface;
+use Drupal\operations_cider\Exception\XdmodAuthenticationException;
+use Drupal\operations_cider\Exception\XdmodEmptyResultException;
 use GuzzleHttp\ClientInterface;
 use GuzzleHttp\Exception\GuzzleException;
+use GuzzleHttp\Exception\RequestException;
 
 /**
  * Fetches queue wait/wall time metrics from XDMoD and caches on nodes.
@@ -76,6 +79,11 @@ class QueueMetricsService {
 
   /**
    * Fetch and cache queue metrics for all resources.
+   *
+   * @throws \Drupal\operations_cider\Exception\XdmodAuthenticationException
+   *   When XDMoD rejects the API token.
+   * @throws \Drupal\operations_cider\Exception\XdmodEmptyResultException
+   *   When every resource with an XDMoD ID came back empty.
    */
   public function updateAll(): void {
     $token = $this->keyRepository->getKey('xdmod_api')?->getKeyValue();
@@ -88,6 +96,8 @@ class QueueMetricsService {
     $end = date('Y-m-d');
     $start = date('Y-m-d', strtotime('-30 days'));
     $updated = 0;
+    $attempted = 0;
+    $succeeded = 0;
 
     foreach ($nodes as $node) {
       if (!$node->hasField('field_rp_xdmod_resource_id')
@@ -96,10 +106,12 @@ class QueueMetricsService {
       }
       $xdmod_id = (int) $node->get('field_rp_xdmod_resource_id')->value;
 
+      $attempted++;
       $data = $this->fetchQueueMetrics($token, $xdmod_id, $start, $end);
       if (empty($data)) {
         continue;
       }
+      $succeeded++;
 
       $json = json_encode([
         'updated' => $end,
@@ -113,6 +125,15 @@ class QueueMetricsService {
       $node->set('field_rp_queue_metrics', $json);
       $node->save();
       $updated++;
+    }
+
+    // One empty resource is normal; all of them empty means the sync is
+    // broken. Nothing was saved above, so the stored metrics are untouched.
+    if ($attempted > 0 && $succeeded === 0) {
+      throw new XdmodEmptyResultException(sprintf(
+        'XDMoD returned no queue metrics for any of the %d resources with an XDMoD ID.',
+        $attempted
+      ));
     }
 
     $this->logger->notice('Updated queue metrics for @count resources.', [
@@ -205,6 +226,10 @@ class QueueMetricsService {
    *
    * @return array
    *   Keyed by queue name, value is the float statistic.
+   *
+   * @throws \Drupal\operations_cider\Exception\XdmodAuthenticationException
+   *   When XDMoD rejects the API token. Other request failures are logged and
+   *   return an empty array.
    */
   protected function queryXdmod(array $params): array {
     try {
@@ -212,9 +237,15 @@ class QueueMetricsService {
         'form_params' => $params,
         'timeout' => 30,
       ]);
+      if ($auth_error = XdmodAuthenticationException::fromResponse($response)) {
+        throw $auth_error;
+      }
       $csv = (string) $response->getBody();
     }
     catch (GuzzleException $e) {
+      if ($e instanceof RequestException && $auth_error = XdmodAuthenticationException::fromRequestException($e)) {
+        throw $auth_error;
+      }
       $this->logger->warning(
         'XDMoD query failed: @message',
         ['@message' => $e->getMessage()]
@@ -233,6 +264,10 @@ class QueueMetricsService {
    *
    * @return array
    *   Keyed by queue name, value is array of daily floats.
+   *
+   * @throws \Drupal\operations_cider\Exception\XdmodAuthenticationException
+   *   When XDMoD rejects the API token. Other request failures are logged and
+   *   return an empty array.
    */
   protected function queryXdmodTimeseries(array $params): array {
     try {
@@ -240,9 +275,15 @@ class QueueMetricsService {
         'form_params' => $params,
         'timeout' => 30,
       ]);
+      if ($auth_error = XdmodAuthenticationException::fromResponse($response)) {
+        throw $auth_error;
+      }
       $csv = (string) $response->getBody();
     }
     catch (GuzzleException $e) {
+      if ($e instanceof RequestException && $auth_error = XdmodAuthenticationException::fromRequestException($e)) {
+        throw $auth_error;
+      }
       $this->logger->warning(
         'XDMoD timeseries query failed: @message',
         ['@message' => $e->getMessage()]

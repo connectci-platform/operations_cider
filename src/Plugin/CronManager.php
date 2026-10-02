@@ -2,6 +2,8 @@
 
 namespace Drupal\operations_cider\Plugin;
 
+use Drupal\operations_cider\Exception\XdmodException;
+
 /**
  * Manages cron job callbacks for the Operations CiDeR module.
  *
@@ -73,6 +75,20 @@ class CronManager {
         '@label' => $label,
         '@message' => $e->getMessage(),
       ]);
+
+      // Tell a human about XDMoD failures only (an expired token otherwise
+      // fails silently every night). The notifier never throws, but guard it
+      // anyway so the original exception is always the one that propagates.
+      if ($e instanceof XdmodException) {
+        try {
+          \Drupal::service('operations_cider.xdmod_alert')->notify($label, $e);
+        }
+        catch (\Throwable $notify_error) {
+          $logger->error('XDMoD alert failed: @message', [
+            '@message' => $notify_error->getMessage(),
+          ]);
+        }
+      }
       throw $e;
     }
 
