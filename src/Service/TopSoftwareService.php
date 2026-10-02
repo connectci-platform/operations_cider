@@ -5,8 +5,11 @@ namespace Drupal\operations_cider\Service;
 use Drupal\Core\Entity\EntityTypeManagerInterface;
 use Drupal\Core\Logger\LoggerChannelFactoryInterface;
 use Drupal\key\KeyRepositoryInterface;
+use Drupal\operations_cider\Exception\XdmodAuthenticationException;
+use Drupal\operations_cider\Exception\XdmodEmptyResultException;
 use GuzzleHttp\ClientInterface;
 use GuzzleHttp\Exception\GuzzleException;
+use GuzzleHttp\Exception\RequestException;
 
 /**
  * Fetches top software by combining XDMoD usage ranking with SDS metadata.
@@ -59,6 +62,11 @@ class TopSoftwareService {
 
   /**
    * Fetch and cache top software for all resources with XDMoD IDs.
+   *
+   * @throws \Drupal\operations_cider\Exception\XdmodAuthenticationException
+   *   When XDMoD rejects the API token.
+   * @throws \Drupal\operations_cider\Exception\XdmodEmptyResultException
+   *   When every XDMoD resource came back empty. SDS lookups do not count.
    */
   public function updateAll(): void {
     $xdmod_token = $this->keyRepository->getKey('xdmod_api')?->getKeyValue();
@@ -88,12 +96,14 @@ class TopSoftwareService {
       $by_xdmod_id[$xdmod_id][] = $node;
     }
 
+    $succeeded = 0;
     foreach ($by_xdmod_id as $xdmod_id => $group_nodes) {
       // Step 1: Get ranked app list from XDMoD.
       $ranked = $this->fetchXdmodApps($xdmod_token, $xdmod_id, $start, $end);
       if ($ranked === NULL) {
         continue;
       }
+      $succeeded++;
 
       // Step 2: Enrich with SDS metadata if available.
       if ($sds_key) {
@@ -125,6 +135,16 @@ class TopSoftwareService {
       }
     }
 
+    // One empty resource is normal; all of them empty means the sync is
+    // broken. Counted per XDMoD ID, and only on the XDMoD fetch: an SDS
+    // failure just leaves the list unenriched.
+    if ($by_xdmod_id && $succeeded === 0) {
+      throw new XdmodEmptyResultException(sprintf(
+        'XDMoD returned no application data for any of the %d XDMoD resources.',
+        count($by_xdmod_id)
+      ));
+    }
+
     $this->logger->notice('Updated top software for @count resources.', [
       '@count' => $updated,
     ]);
@@ -135,6 +155,10 @@ class TopSoftwareService {
    *
    * @return array|null
    *   Array of ['name' => ..., 'job_count' => ...], or NULL.
+   *
+   * @throws \Drupal\operations_cider\Exception\XdmodAuthenticationException
+   *   When XDMoD rejects the API token. Other request failures are logged and
+   *   return NULL.
    */
   protected function fetchXdmodApps(
     string $token,
@@ -158,9 +182,15 @@ class TopSoftwareService {
         ],
         'timeout' => 30,
       ]);
+      if ($auth_error = XdmodAuthenticationException::fromResponse($response)) {
+        throw $auth_error;
+      }
       $csv = (string) $response->getBody();
     }
     catch (GuzzleException $e) {
+      if ($e instanceof RequestException && $auth_error = XdmodAuthenticationException::fromRequestException($e)) {
+        throw $auth_error;
+      }
       $this->logger->warning(
         'XDMoD SUPREMM query failed for resource @id: @message',
         ['@id' => $resource_id, '@message' => $e->getMessage()]
