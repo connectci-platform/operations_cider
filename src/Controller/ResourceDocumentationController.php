@@ -514,6 +514,7 @@ class ResourceDocumentationController extends ControllerBase {
    */
   private function getParagraphData($node, string $field_name, array $field_map): array {
     $items = [];
+    /** @var \Drupal\Core\Entity\RevisionableStorageInterface $paragraph_storage */
     $paragraph_storage = $this->entityTypeManager()->getStorage('paragraph');
     foreach ($node->get($field_name) as $ref) {
       $paragraph = $paragraph_storage->loadRevision($ref->target_revision_id);
