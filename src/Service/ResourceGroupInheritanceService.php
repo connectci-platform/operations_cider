@@ -75,14 +75,17 @@ class ResourceGroupInheritanceService {
    *
    * @param \Drupal\node\NodeInterface $resource
    *   The Resource node. Must be the access_active_resources_from_cid bundle.
+   * @param \Drupal\node\NodeInterface|null $group
+   *   The parent Resource Group, when the caller already has it. If NULL, it
+   *   is looked up with findParentGroup(). A passed group skips the lookup.
    *
    * @return \Drupal\node\NodeInterface
    *   The same node, mutated in memory. If the Resource has no parent Group,
    *   or none of the Group's inheritable fields are populated, it is returned
    *   unchanged.
    */
-  public function applyInheritance(NodeInterface $resource): NodeInterface {
-    $group = $this->findParentGroup($resource);
+  public function applyInheritance(NodeInterface $resource, ?NodeInterface $group = NULL): NodeInterface {
+    $group = $group ?? $this->findParentGroup($resource);
     if (!$group) {
       return $resource;
     }

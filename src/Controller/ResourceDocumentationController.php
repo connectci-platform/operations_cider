@@ -6,6 +6,7 @@ use Drupal\Component\Utility\Html;
 use Drupal\Core\Cache\CacheableJsonResponse;
 use Drupal\Core\Cache\CacheableMetadata;
 use Drupal\Core\Controller\ControllerBase;
+use Drupal\node\NodeInterface;
 use Drupal\operations_cider\ResourceContentHash;
 use Drupal\operations_cider\Service\OodSoftwareService;
 use Drupal\operations_cider\Service\ResourceGroupInheritanceService;
@@ -38,6 +39,78 @@ class ResourceDocumentationController extends ControllerBase {
     'external_storage' => 'field_rp_external_storage_link',
     'file_transfer' => 'field_rp_file_transfer_link',
     'datasets' => 'field_rp_datasets_link',
+  ];
+
+  /**
+   * Section ids for populated_sections, in output order.
+   *
+   * The agent's RPSectionCache uses these identifiers to build the
+   * section_question_map for scoped capabilities, so do not rename them.
+   */
+  private const SECTION_ORDER = [
+    'login',
+    'file_transfer',
+    'storage',
+    'queue_specs',
+    'top_software',
+    'datasets',
+  ];
+
+  /**
+   * Paragraph field => payload key for SSH login node rows.
+   */
+  private const SSH_LOGIN_MAP = [
+    'field_rp_ssh_hostname' => 'hostname',
+    'field_rp_ssh_user_placeholder' => 'username_placeholder',
+    'field_rp_ssh_docs_url' => 'docs_url',
+    'field_rp_recommended' => 'recommended',
+  ];
+
+  /**
+   * Paragraph field => payload key for file transfer rows.
+   */
+  private const FILE_TRANSFER_MAP = [
+    'field_rp_method' => 'method',
+    'field_rp_transfer_node' => 'transfer_node',
+    'field_rp_transfer_url' => 'transfer_url',
+    'field_rp_recommended' => 'recommended',
+  ];
+
+  /**
+   * Paragraph field => payload key for storage rows.
+   */
+  private const STORAGE_MAP = [
+    'field_rp_directory' => 'directory',
+    'field_rp_fs_path' => 'path',
+    'field_rp_quota_size' => 'quota_size',
+    'field_rp_quota_inode_amount' => 'quota_inode_amount',
+    'field_rp_purge' => 'purge',
+    'field_rp_backup' => 'backup',
+    'field_rp_fs_notes' => 'notes',
+  ];
+
+  /**
+   * Paragraph field => payload key for queue spec rows.
+   */
+  private const QUEUE_SPEC_MAP = [
+    'field_rp_queue_name' => 'name',
+    'field_rp_queue_purpose' => 'purpose',
+    'field_rp_node_count' => 'node_count',
+    'field_rp_cpu_count' => 'cpu_count',
+    'field_rp_cpus' => 'cpu_type',
+    'field_rp_gpu_count' => 'gpu_count',
+    'field_rp_gpus' => 'gpu_type',
+    'field_rp_gpu_vram' => 'gpu_vram',
+    'field_rp_vram' => 'ram',
+    'field_rp_max_wall_time' => 'max_wall_time_minutes',
+  ];
+
+  /**
+   * Paragraph field => payload key for dataset rows.
+   */
+  private const DATASET_MAP = [
+    'field_rp_dataset_name' => 'name',
+    'field_rp_dataset_description' => 'description',
   ];
 
   /**
@@ -189,46 +262,14 @@ class ResourceDocumentationController extends ControllerBase {
       'jobs_info' => $this->getScalarValue($node, 'field_rp_jobs_info'),
       'software_list_url' => $this->getLinkValue($node, 'field_rp_software_list_url'),
       'external_storage' => $this->getScalarValue($node, 'field_rp_external_storage'),
-      'ssh_logins' => $this->getParagraphData($node, 'field_rp_ssh_login_nodes', [
-        'field_rp_ssh_hostname' => 'hostname',
-        'field_rp_ssh_user_placeholder' => 'username_placeholder',
-        'field_rp_ssh_docs_url' => 'docs_url',
-        'field_rp_recommended' => 'recommended',
-      ]),
+      'ssh_logins' => $this->getParagraphData($node, 'field_rp_ssh_login_nodes', self::SSH_LOGIN_MAP),
       'login_help_links' => $this->getMultiLinkValues($node, 'field_rp_login_help_links'),
       'account_setup_url' => $this->getLinkValue($node, 'field_rp_account_setup_url'),
       'support_links' => $this->getMultiLinkValues($node, 'field_rp_support_links'),
-      'file_transfer' => $this->getParagraphData($node, 'field_rp_file_transfer', [
-        'field_rp_method' => 'method',
-        'field_rp_transfer_node' => 'transfer_node',
-        'field_rp_transfer_url' => 'transfer_url',
-        'field_rp_recommended' => 'recommended',
-      ]),
-      'storage' => $this->getParagraphData($node, 'field_rp_storage', [
-        'field_rp_directory' => 'directory',
-        'field_rp_fs_path' => 'path',
-        'field_rp_quota_size' => 'quota_size',
-        'field_rp_quota_inode_amount' => 'quota_inode_amount',
-        'field_rp_purge' => 'purge',
-        'field_rp_backup' => 'backup',
-        'field_rp_fs_notes' => 'notes',
-      ]),
-      'queue_specs' => $this->getParagraphData($node, 'field_rp_queue_specs', [
-        'field_rp_queue_name' => 'name',
-        'field_rp_queue_purpose' => 'purpose',
-        'field_rp_node_count' => 'node_count',
-        'field_rp_cpu_count' => 'cpu_count',
-        'field_rp_cpus' => 'cpu_type',
-        'field_rp_gpu_count' => 'gpu_count',
-        'field_rp_gpus' => 'gpu_type',
-        'field_rp_gpu_vram' => 'gpu_vram',
-        'field_rp_vram' => 'ram',
-        'field_rp_max_wall_time' => 'max_wall_time_minutes',
-      ]),
-      'datasets' => $this->getParagraphData($node, 'field_rp_datasets', [
-        'field_rp_dataset_name' => 'name',
-        'field_rp_dataset_description' => 'description',
-      ]),
+      'file_transfer' => $this->getParagraphData($node, 'field_rp_file_transfer', self::FILE_TRANSFER_MAP),
+      'storage' => $this->getParagraphData($node, 'field_rp_storage', self::STORAGE_MAP),
+      'queue_specs' => $this->getParagraphData($node, 'field_rp_queue_specs', self::QUEUE_SPEC_MAP),
+      'datasets' => $this->getParagraphData($node, 'field_rp_datasets', self::DATASET_MAP),
     ];
 
     // Per-section documentation links. These are the twelve inheritable link
@@ -339,21 +380,13 @@ class ResourceDocumentationController extends ControllerBase {
    * - `title`: clean human-readable group title (e.g. "Anvil", "Bridges-2").
    * - `populated_sections`: union of documented section types across all
    *   member CIDER variants. Used by the agent to build resource-scoped
-   *   capability menus.
+   *   capability menus. It reflects inherited values (each variant is resolved
+   *   against its group) and counts a section only when the detail endpoint
+   *   would return content for it. The login section also counts the OnDemand
+   *   URL, login text and login help links.
    * - `variants`: list of member CIDER variants for traceability.
    */
   public function listResourceGroups() {
-    // Field-to-section mapping. The agent's RPSectionCache uses these
-    // identifiers to build the section_question_map for scoped capabilities.
-    $section_fields = [
-      'field_rp_ssh_login_nodes' => 'login',
-      'field_rp_file_transfer' => 'file_transfer',
-      'field_rp_storage' => 'storage',
-      'field_rp_queue_specs' => 'queue_specs',
-      'field_rp_top_software' => 'top_software',
-      'field_rp_datasets' => 'datasets',
-    ];
-
     $node_storage = $this->entityTypeManager()->getStorage('node');
     $query = $node_storage
       ->getQuery()
@@ -364,8 +397,14 @@ class ResourceDocumentationController extends ControllerBase {
     $group_nids = $query->execute();
     $groups = $node_storage->loadMultiple($group_nids);
 
+    $cacheability = (new CacheableMetadata())->addCacheTags([
+      'node_list:resource_group',
+      'node_list:access_active_resources_from_cid',
+    ]);
+
     $result = [];
     foreach ($groups as $group) {
+      $cacheability->addCacheableDependency($group);
       $title = $group->getTitle();
       $slug = Html::getClass($title);
       $variant_refs = $group->get('field_cider_resources');
@@ -377,6 +416,7 @@ class ResourceDocumentationController extends ControllerBase {
         if (!$variant) {
           continue;
         }
+        $cacheability->addCacheableDependency($variant);
         $variants[] = [
           'nid' => (int) $variant->id(),
           'title' => operations_cider_resource_display_name($variant),
@@ -385,16 +425,13 @@ class ResourceDocumentationController extends ControllerBase {
           'global_resource_id' => $variant->get('field_access_global_resource_id')->value,
         ];
 
-        // Check which section fields have content on this variant.
-        foreach ($section_fields as $field_name => $section_id) {
-          if (in_array($section_id, $populated, TRUE)) {
-            continue;
-          }
-          if ($variant->hasField($field_name) && !$variant->get($field_name)->isEmpty()) {
-            $populated[] = $section_id;
-          }
-        }
+        // Resolve inheritance on a clone, as getResource() does, so the list
+        // agrees with what the detail endpoint returns for this variant.
+        $resolved = clone $variant;
+        $this->inheritance->applyInheritance($resolved, $group);
+        $populated = array_merge($populated, $this->populatedSections($resolved));
       }
+      $populated = array_values(array_intersect(self::SECTION_ORDER, $populated));
 
       $result[] = [
         'nid' => (int) $group->id(),
@@ -410,12 +447,44 @@ class ResourceDocumentationController extends ControllerBase {
       'count' => count($result),
       'groups' => $result,
     ]);
-    $cacheability = (new CacheableMetadata())->addCacheTags([
-      'node_list:resource_group',
-      'node_list:access_active_resources_from_cid',
-    ]);
     $response->addCacheableDependency($cacheability);
     return $response;
+  }
+
+  /**
+   * List the sections for which the detail endpoint would return content.
+   *
+   * Expects a node that already had inheritance applied. Uses the same
+   * extractors as getResource(), so a paragraph with a missing revision or only
+   * empty fields does not count.
+   *
+   * @return string[]
+   *   Section ids in SECTION_ORDER order.
+   */
+  private function populatedSections(NodeInterface $node): array {
+    $has_rows = fn(string $field, array $map): bool =>
+      $node->hasField($field) && $this->getParagraphData($node, $field, $map) !== [];
+
+    $login = $has_rows('field_rp_ssh_login_nodes', self::SSH_LOGIN_MAP)
+      || ($node->hasField('field_rp_ondemand_url') && !$node->get('field_rp_ondemand_url')->isEmpty())
+      || trim((string) $this->getScalarValue($node, 'field_rp_login_text')) !== ''
+      || $this->getMultiLinkValues($node, 'field_rp_login_help_links') !== [];
+
+    $top_software = FALSE;
+    if ($node->hasField('field_rp_top_software')) {
+      $decoded = json_decode((string) $node->get('field_rp_top_software')->value, TRUE);
+      $top_software = is_array($decoded) && $decoded !== [];
+    }
+
+    $flags = [
+      'login' => $login,
+      'file_transfer' => $has_rows('field_rp_file_transfer', self::FILE_TRANSFER_MAP),
+      'storage' => $has_rows('field_rp_storage', self::STORAGE_MAP),
+      'queue_specs' => $has_rows('field_rp_queue_specs', self::QUEUE_SPEC_MAP),
+      'top_software' => $top_software,
+      'datasets' => $has_rows('field_rp_datasets', self::DATASET_MAP),
+    ];
+    return array_keys(array_filter($flags));
   }
 
   /**
