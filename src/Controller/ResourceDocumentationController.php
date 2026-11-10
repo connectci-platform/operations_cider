@@ -6,6 +6,7 @@ use Drupal\Component\Utility\Html;
 use Drupal\Core\Cache\CacheableJsonResponse;
 use Drupal\Core\Cache\CacheableMetadata;
 use Drupal\Core\Controller\ControllerBase;
+use Drupal\node\NodeInterface;
 use Drupal\operations_cider\ResourceContentHash;
 use Drupal\operations_cider\Service\OodSoftwareService;
 use Drupal\operations_cider\Service\ResourceGroupInheritanceService;
@@ -39,6 +40,15 @@ class ResourceDocumentationController extends ControllerBase {
     'file_transfer' => 'field_rp_file_transfer_link',
     'datasets' => 'field_rp_datasets_link',
   ];
+
+  /**
+   * Domain id whose public documentation index defines "listed".
+   *
+   * Mirrors the filter in views.view.rp_documentation_index (the
+   * /documentation/resources page): published resources and resource groups
+   * with field_rp_listing set and field_domain_access containing this domain.
+   */
+  private const LISTED_DOMAIN_ID = 'amp_cyberinfrastructure_org';
 
   /**
    * The resource group inheritance service.
@@ -103,6 +113,9 @@ class ResourceDocumentationController extends ControllerBase {
     $nids = $query->execute();
     $nodes = $this->entityTypeManager()->getStorage('node')->loadMultiple($nids);
 
+    // One group query for the whole list; membership is a set lookup below.
+    $listed_member_nids = $this->listedGroupMemberNids();
+
     $resources = [];
     foreach ($nodes as $node) {
       $resources[] = [
@@ -115,6 +128,7 @@ class ResourceDocumentationController extends ControllerBase {
         'status' => $node->get('field_cider_latest_status')->value,
         'resource_type' => $node->get('field_cider_resource_type')->value,
         'has_documentation' => !$node->get('field_rp_description')->isEmpty(),
+        'listed' => $this->isListed($node, $listed_member_nids),
         'url' => $node->toUrl('canonical', ['absolute' => TRUE])->toString(),
         'last_modified' => date('c', $node->getChangedTime()),
       ];
@@ -130,7 +144,10 @@ class ResourceDocumentationController extends ControllerBase {
       'resources' => $resources,
     ]);
     $cacheability = (new CacheableMetadata())
-      ->addCacheTags(['node_list:access_active_resources_from_cid'])
+      ->addCacheTags([
+        'node_list:access_active_resources_from_cid',
+        'node_list:resource_group',
+      ])
       ->addCacheContexts(['url.query_args:documented']);
     $response->addCacheableDependency($cacheability);
     return $response;
@@ -156,7 +173,45 @@ class ResourceDocumentationController extends ControllerBase {
     }
 
     $node = $this->entityTypeManager()->getStorage('node')->load(reset($nids));
+    return $this->buildResourceDetailResponse($node);
+  }
+
+  /**
+   * GET /api/1.0/resources/node/{nid} — full resource detail by node ID.
+   *
+   * Same payload as getResource(), for resources with no CIDER resource ID.
+   * Only published access_active_resources_from_cid nodes are served; any
+   * other nid (missing, unpublished, other bundle) is a 404.
+   */
+  public function getResourceByNid(int|string $nid): JsonResponse {
+    $nids = $this->entityTypeManager()
+      ->getStorage('node')
+      ->getQuery()
+      ->condition('type', 'access_active_resources_from_cid')
+      ->condition('nid', (int) $nid)
+      ->condition('status', 1)
+      ->accessCheck(TRUE)
+      ->range(0, 1)
+      ->execute();
+
+    if (empty($nids)) {
+      return new JsonResponse(['error' => 'Resource not found'], 404);
+    }
+
+    $node = $this->entityTypeManager()->getStorage('node')->load(reset($nids));
+    return $this->buildResourceDetailResponse($node);
+  }
+
+  /**
+   * Build the full detail response for an already-loaded resource node.
+   *
+   * Shared by getResource() and getResourceByNid() so both return identical
+   * responses for the same node.
+   */
+  private function buildResourceDetailResponse(NodeInterface $node): CacheableJsonResponse {
     $group = $this->inheritance->findParentGroup($node);
+    // Computed from the unmodified node, before inheritance touches the clone.
+    $listed = $this->isListed($node, $this->listedGroupMemberNids());
 
     // Apply Group-level inheritance to a clone so our in-memory mutations
     // don't leak into Drupal's static entity cache for downstream callers.
@@ -177,6 +232,7 @@ class ResourceDocumentationController extends ControllerBase {
       'status' => $node->get('field_cider_latest_status')->value,
       'url' => $node->toUrl('canonical', ['absolute' => TRUE])->toString(),
       'last_modified' => date('c', $changed),
+      'listed' => $listed,
       'description' => $node->get('field_rp_description')->value,
       'mfa_required' => (bool) $node->get('field_rp_mfa_required')->value,
       'account_required' => (bool) $node->get('field_rp_account_required')->value,
@@ -312,7 +368,10 @@ class ResourceDocumentationController extends ControllerBase {
 
     $data['content_hash'] = ResourceContentHash::hash($data);
 
-    $cacheability = (new CacheableMetadata())->addCacheableDependency($node);
+    // `listed` depends on resource groups (membership, listing flag, status).
+    $cacheability = (new CacheableMetadata())
+      ->addCacheableDependency($node)
+      ->addCacheTags(['node_list:resource_group']);
     if ($group) {
       // Inherited values mean edits to the Group must invalidate this response.
       $cacheability->addCacheableDependency($group);
@@ -416,6 +475,73 @@ class ResourceDocumentationController extends ControllerBase {
     ]);
     $response->addCacheableDependency($cacheability);
     return $response;
+  }
+
+  /**
+   * Whether a node is flagged for listing on the documentation index domain.
+   *
+   * True when field_rp_listing is set and field_domain_access includes
+   * LISTED_DOMAIN_ID, matching views.view.rp_documentation_index.
+   *
+   * @param \Drupal\node\NodeInterface $node
+   *   A resource or resource group.
+   */
+  private function isFlaggedListed(NodeInterface $node): bool {
+    if (!$node->hasField('field_rp_listing') || !$node->hasField('field_domain_access')) {
+      return FALSE;
+    }
+    if (!(bool) $node->get('field_rp_listing')->value) {
+      return FALSE;
+    }
+    foreach ($node->get('field_domain_access') as $item) {
+      if (($item->getValue()['target_id'] ?? NULL) === self::LISTED_DOMAIN_ID) {
+        return TRUE;
+      }
+    }
+    return FALSE;
+  }
+
+  /**
+   * Nids of resources that are members of a listed, published resource group.
+   *
+   * One group query plus one loadMultiple, however many resources are asked
+   * about afterwards.
+   *
+   * @return array<int, true>
+   *   Set of member nids, keyed by nid.
+   */
+  private function listedGroupMemberNids(): array {
+    $storage = $this->entityTypeManager()->getStorage('node');
+    $group_nids = $storage->getQuery()
+      ->condition('type', 'resource_group')
+      ->condition('status', 1)
+      ->accessCheck(TRUE)
+      ->execute();
+
+    $members = [];
+    foreach ($storage->loadMultiple($group_nids) as $group) {
+      if (!$this->isFlaggedListed($group) || !$group->hasField('field_cider_resources')) {
+        continue;
+      }
+      foreach ($group->get('field_cider_resources') as $item) {
+        $members[(int) ($item->getValue()['target_id'] ?? 0)] = TRUE;
+      }
+    }
+    return $members;
+  }
+
+  /**
+   * Whether a resource appears on the public documentation index.
+   *
+   * Listed on its own, or via membership in a listed group.
+   *
+   * @param \Drupal\node\NodeInterface $node
+   *   A resource node.
+   * @param array<int, true> $listed_member_nids
+   *   Result of listedGroupMemberNids().
+   */
+  private function isListed(NodeInterface $node, array $listed_member_nids): bool {
+    return $this->isFlaggedListed($node) || isset($listed_member_nids[(int) $node->id()]);
   }
 
   /**

@@ -27,9 +27,12 @@ final class ResourceContentHash {
    * refreshed nightly, and `queue_metrics_updated` is the date of that refresh;
    * both move when nothing a consumer would call a content change has happened,
    * so leaving them in would churn the fingerprint daily and defeat the change
-   * detection it exists for.
+   * detection it exists for. `listed` says whether the resource appears on
+   * /documentation/resources (its own listing box or a listed group). It is
+   * visibility, not documentation content, and a group toggle would otherwise
+   * churn every member's fingerprint.
    */
-  private const STRIP_TOP_LEVEL = ['last_modified', 'url', 'queue_metrics', 'queue_metrics_updated'];
+  private const STRIP_TOP_LEVEL = ['last_modified', 'url', 'queue_metrics', 'queue_metrics_updated', 'listed'];
 
   /**
    * Multi-value link-list fields whose entries carry a host-absolute `url`
