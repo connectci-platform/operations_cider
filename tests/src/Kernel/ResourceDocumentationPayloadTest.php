@@ -203,6 +203,80 @@ class ResourceDocumentationPayloadTest extends KernelTestBase {
     }
   }
 
+  /**
+   * A valid last_data passes through; updated stays the fetch date.
+   */
+  public function testLastDataIsDecodedSeparatelyFromUpdated(): void {
+    $resource = $this->makeResourceWithMetrics([
+      'updated' => '2026-11-10',
+      'last_data' => '2026-10-19',
+      'queues' => [],
+    ]);
+    $decoded = $this->decodeMetrics($resource);
+    $this->assertSame('2026-10-19', $decoded['last_data']);
+    $this->assertSame('2026-11-10', $decoded['updated']);
+  }
+
+  /**
+   * Legacy blobs and malformed last_data values decode to NULL.
+   */
+  public function testMissingOrMalformedLastDataIsNull(): void {
+    $blobs = [
+      'legacy' => ['updated' => '2026-11-10', 'queues' => []],
+      'text' => ['updated' => '2026-11-10', 'last_data' => '2 hours ago', 'queues' => []],
+      'int' => ['updated' => '2026-11-10', 'last_data' => 123, 'queues' => []],
+      'impossible' => ['updated' => '2026-11-10', 'last_data' => '2026-13-40', 'queues' => []],
+    ];
+    foreach ($blobs as $label => $blob) {
+      $decoded = $this->decodeMetrics($this->makeResourceWithMetrics($blob));
+      $this->assertNull($decoded['last_data'], "Case '$label' should yield NULL.");
+      $this->assertSame('2026-11-10', $decoded['updated']);
+    }
+  }
+
+  /**
+   * Decoding keeps a null wait_time as null rather than dropping it or using 0.
+   *
+   * The encoded response is pinned by the Cypress resource-api test.
+   */
+  public function testNullWaitTimeEncodesAsJsonNull(): void {
+    $resource = $this->makeResourceWithMetrics([
+      'updated' => '2026-11-10',
+      'last_data' => NULL,
+      'queues' => ['wholenode' => ['wait_time' => NULL, 'job_count' => 5]],
+    ]);
+    $decoded = $this->decodeMetrics($resource);
+    $json = json_encode((object) $decoded['queues']);
+    $this->assertSame('{"wholenode":{"wait_time":null,"job_count":5}}', $json);
+  }
+
+  /**
+   * The text "None" for gpu_type is dropped; a single node is singular.
+   */
+  public function testQueueSummaryHandlesNoneGpuAndSingularNode(): void {
+    $this->assertSame('2 nodes', $this->summary(['gpu_type' => 'None', 'node_count' => 2]));
+    $this->assertSame('2 nodes', $this->summary(['gpu_type' => ' none ', 'node_count' => 2]));
+    $gpu = ['gpu_count' => 2, 'gpu_type' => 'None', 'gpu_vram' => 80, 'node_count' => 1];
+    $this->assertSame('2 (80 GB vRAM), 1 node', $this->summary($gpu));
+    $one = $this->summary(['node_count' => 1]);
+    $this->assertStringContainsString('1 node', $one);
+    $this->assertStringNotContainsString('1 nodes', $one);
+    $a100 = ['gpu_count' => 4, 'gpu_type' => 'NVIDIA A100', 'node_count' => 2];
+    $this->assertSame('4 NVIDIA A100, 2 nodes', $this->summary($a100));
+  }
+
+  /**
+   * Call the controller's own queue summary builder.
+   */
+  private function summary(array $queue): ?string {
+    $controller = \Drupal::classResolver(
+      'Drupal\operations_cider\Controller\ResourceDocumentationController'
+    );
+    $method = new \ReflectionMethod($controller, 'buildQueueSummary');
+    $method->setAccessible(TRUE);
+    return $method->invoke($controller, $queue);
+  }
+
   private function makeResourceWithMetrics(array $metrics): Node {
     $node = Node::create([
       'type' => 'access_active_resources_from_cid',
@@ -246,6 +320,8 @@ class ResourceDocumentationPayloadTest extends KernelTestBase {
     $decoded = $this->decodeMetrics($resource);
     $this->assertSame([], $decoded['queues']);
     $this->assertNull($decoded['updated']);
+    $this->assertArrayHasKey('last_data', $decoded);
+    $this->assertNull($decoded['last_data']);
   }
 
   /**

@@ -160,6 +160,144 @@ trait XdmodTestTrait {
   }
 
   /**
+   * Builds an XDMoD CSV response body.
+   *
+   * @param string[] $header
+   *   Column headers. For a timeseries, the queue columns after "Day", in
+   *   XDMoD's "[queue] Label" form.
+   * @param string[] $rows
+   *   Raw CSV data lines.
+   * @param bool $timeseries
+   *   TRUE for a timeseries, FALSE for an aggregate.
+   */
+  protected function xdmodCsv(array $header, array $rows, bool $timeseries): string {
+    $head = $timeseries ? 'Day,' : 'Queue,';
+    return "title\n\"Stat\"\nparameters\n\"Resource =  Test\"\nstart,end\n2026-10-11,2026-11-10\n---------\n"
+      . $head . implode(',', array_map(fn($h) => '"' . $h . '"', $header)) . "\n"
+      . implode("\n", $rows) . "\n---------\n";
+  }
+
+  /**
+   * Trimmed copies of the Anvil CPU CSVs (XDMoD resource 3097).
+   *
+   * XDMoD stops emitting rows after 2026-10-19. The wait series orders its
+   * columns differently from the wall and job count ones.
+   *
+   * @return string[]
+   *   CSV bodies keyed "statistic|dataset_type".
+   */
+  protected function anvilFixtures(): array {
+    $wait = [
+      '[wholenode] Wait Hours: Per Job',
+      '[shared] Wait Hours: Per Job',
+      '[debug] Wait Hours: Per Job',
+    ];
+    $wall = [
+      '[shared] Wall Hours: Per Job',
+      '[wholenode] Wall Hours: Per Job',
+      '[debug] Wall Hours: Per Job',
+    ];
+    return [
+      'avg_waitduration_hours|aggregate' => $this->xdmodCsv(
+        ['Wait Hours: Per Job'],
+        ['wholenode,31.48470000', 'shared,12.51234567', 'debug,0.60000000'],
+        FALSE,
+      ),
+      'avg_wallduration_hours|aggregate' => $this->xdmodCsv(
+        ['Wall Hours: Per Job'],
+        ['shared,2.10000000', 'wholenode,10.74570000', 'debug,0.25000000'],
+        FALSE,
+      ),
+      'job_count|aggregate' => $this->xdmodCsv(
+        ['Number of Jobs Ended'],
+        ['shared,262958', 'wholenode,5666', 'debug,949'],
+        FALSE,
+      ),
+      'avg_waitduration_hours|timeseries' => $this->xdmodCsv($wait, [
+        '2026-10-15,22.91879801,30.95660843,1.61820326',
+        '2026-10-16,47.03543429,5.24002242,0.41551643',
+        '2026-10-17,19.11594957,5.38780641,0.62587737',
+        '2026-10-18,7.76950588,1.69389702,0.29344722',
+        '2026-10-19,7.60215668,1.14019506,0.38607288',
+      ], TRUE),
+      'avg_wallduration_hours|timeseries' => $this->xdmodCsv($wall, [
+        '2026-10-15,2.50000000,11.10000000,0.20000000',
+        '2026-10-16,1.90000000,9.80000000,0.30000000',
+        '2026-10-17,2.20000000,10.10000000,0.25000000',
+        '2026-10-18,2.00000000,12.30000000,0.22000000',
+        '2026-10-19,2.30000000,10.40000000,0.28000000',
+      ], TRUE),
+    ];
+  }
+
+  /**
+   * Trimmed copies of the Delta CPU CSVs (XDMoD resource 3031).
+   *
+   * Delta reports no wait data (every wait is zero), and bare 0 cells mark
+   * days a queue ran no jobs.
+   *
+   * @return string[]
+   *   CSV bodies keyed "statistic|dataset_type".
+   */
+  protected function deltaFixtures(): array {
+    $wait = ['[cpu] Wait Hours: Per Job', '[cpu-preempt] Wait Hours: Per Job'];
+    $wall = ['[cpu-preempt] Wall Hours: Per Job', '[cpu] Wall Hours: Per Job'];
+    return [
+      'avg_waitduration_hours|aggregate' => $this->xdmodCsv(
+        ['Wait Hours: Per Job'],
+        ['cpu,0', 'cpu-preempt,0.00000000'],
+        FALSE,
+      ),
+      'avg_wallduration_hours|aggregate' => $this->xdmodCsv(
+        ['Wall Hours: Per Job'],
+        ['cpu,1.20000000', 'cpu-preempt,0.80000000'],
+        FALSE,
+      ),
+      'job_count|aggregate' => $this->xdmodCsv(
+        ['Number of Jobs Ended'],
+        ['cpu,180000', 'cpu-preempt,512'],
+        FALSE,
+      ),
+      'avg_waitduration_hours|timeseries' => $this->xdmodCsv($wait, [
+        '2026-11-06,0.00000000,0.00000000',
+        '2026-11-07,0.00000000,0',
+        '2026-11-08,0.00000000,0',
+        '2026-11-09,0.00000000,0',
+      ], TRUE),
+      'avg_wallduration_hours|timeseries' => $this->xdmodCsv($wall, [
+        '2026-11-06,0.50000000,1.30000000',
+        '2026-11-07,0,1.10000000',
+        '2026-11-08,0,1.20000000',
+        '2026-11-09,0,0.90000000',
+      ], TRUE),
+    ];
+  }
+
+  /**
+   * Builds a client answering by "statistic" and "dataset_type" form fields.
+   *
+   * @param array $by_resource
+   *   Fixture maps (see anvilFixtures()) keyed by XDMoD resource ID.
+   *
+   * @return \GuzzleHttp\Client
+   *   A client routing requests to the matching fixture.
+   */
+  protected function fixtureClient(array $by_resource): Client {
+    $handler = function ($request) use ($by_resource) {
+      parse_str((string) $request->getBody(), $form);
+      $key = $form['statistic'] . '|' . $form['dataset_type'];
+      return Create::promiseFor(
+        new Response(
+          200,
+          ['Content-Type' => 'text/csv'],
+          $by_resource[(int) $form['resource_filter']][$key],
+        )
+      );
+    };
+    return new Client(['handler' => HandlerStack::create($handler)]);
+  }
+
+  /**
    * A 200 response with a CSV body.
    */
   protected function csvResponse(): Response {
