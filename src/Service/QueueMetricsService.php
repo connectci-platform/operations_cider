@@ -7,6 +7,7 @@ use Drupal\Core\Logger\LoggerChannelFactoryInterface;
 use Drupal\key\KeyRepositoryInterface;
 use Drupal\operations_cider\Exception\XdmodAuthenticationException;
 use Drupal\operations_cider\Exception\XdmodEmptyResultException;
+use Drupal\operations_cider\QueueMetricsValues;
 use GuzzleHttp\ClientInterface;
 use GuzzleHttp\Exception\GuzzleException;
 use GuzzleHttp\Exception\RequestException;
@@ -115,6 +116,7 @@ class QueueMetricsService {
 
       $json = json_encode([
         'updated' => $end,
+        'last_data' => QueueMetricsValues::lastDataDate($data),
         'resource' => $node->get('field_access_global_resource_id')->value,
         'queues' => $data,
       ]);
@@ -154,7 +156,10 @@ class QueueMetricsService {
    *   End date (YYYY-MM-DD).
    *
    * @return array
-   *   Per-queue data keyed by queue name.
+   *   Per-queue data keyed by queue name: wait_time, wall_time, job_count
+   *   (NULL when missing), plus daily_dates (ascending YYYY-MM-DD) with
+   *   daily_wait and daily_wall aligned to it (float or NULL). Exact-zero
+   *   waits are NULL, since they mean "no wait data".
    */
   protected function fetchQueueMetrics(
     string $token,
@@ -206,12 +211,23 @@ class QueueMetricsService {
     ));
 
     foreach ($all_queue_names as $queue) {
+      $wait_days = $wait_ts[$queue] ?? [];
+      $wall_days = $wall_ts[$queue] ?? [];
+      $dates = array_unique(array_merge(array_keys($wait_days), array_keys($wall_days)));
+      sort($dates);
+      $daily_wait = [];
+      $daily_wall = [];
+      foreach ($dates as $date) {
+        $daily_wait[] = QueueMetricsValues::waitOrNull($wait_days[$date] ?? NULL);
+        $daily_wall[] = $wall_days[$date] ?? NULL;
+      }
       $queues[$queue] = [
-        'wait_time' => $wait_data[$queue] ?? NULL,
+        'wait_time' => QueueMetricsValues::waitOrNull($wait_data[$queue] ?? NULL),
         'wall_time' => $wall_data[$queue] ?? NULL,
         'job_count' => isset($job_count_data[$queue]) ? (int) $job_count_data[$queue] : NULL,
-        'daily_wait' => $wait_ts[$queue] ?? [],
-        'daily_wall' => $wall_ts[$queue] ?? [],
+        'daily_dates' => $dates,
+        'daily_wait' => $daily_wait,
+        'daily_wall' => $daily_wall,
       ];
     }
 
@@ -225,7 +241,7 @@ class QueueMetricsService {
    *   POST form params.
    *
    * @return array
-   *   Keyed by queue name, value is the float statistic.
+   *   Keyed by queue name, value is the float statistic or NULL when missing.
    *
    * @throws \Drupal\operations_cider\Exception\XdmodAuthenticationException
    *   When XDMoD rejects the API token. Other request failures are logged and
@@ -263,7 +279,8 @@ class QueueMetricsService {
    *   POST form params.
    *
    * @return array
-   *   Keyed by queue name, value is array of daily floats.
+   *   Keyed by queue name, value is a map of date (YYYY-MM-DD) to float, or
+   *   NULL for a day without data.
    *
    * @throws \Drupal\operations_cider\Exception\XdmodAuthenticationException
    *   When XDMoD rejects the API token. Other request failures are logged and
@@ -305,7 +322,8 @@ class QueueMetricsService {
    *   Raw CSV response.
    *
    * @return array
-   *   Keyed by queue name, value is the float.
+   *   Keyed by queue name, value is the float, or NULL when the cell is a bare
+   *   0 or not numeric.
    */
   protected function parseCsvAggregate(string $csv): array {
     $result = [];
@@ -328,8 +346,9 @@ class QueueMetricsService {
         continue;
       }
       $row = str_getcsv($line);
-      if (count($row) >= 2 && trim($row[0]) !== '' && is_numeric($row[1])) {
-        $result[trim($row[0])] = round((float) $row[1], 4);
+      if (count($row) >= 2 && trim($row[0]) !== '') {
+        $value = QueueMetricsValues::parseCell($row[1]);
+        $result[trim($row[0])] = $value === NULL ? NULL : round($value, 4);
       }
     }
 
@@ -337,15 +356,17 @@ class QueueMetricsService {
   }
 
   /**
-   * Parse XDMoD timeseries CSV into queue → daily values map.
+   * Parse XDMoD timeseries CSV into queue → date → value map.
    *
-   * Timeseries CSV has columns: date, queue1, queue2, ...
+   * Timeseries CSV has columns: date, queue1, queue2, ... Columns are matched
+   * to queues by header name, and the date column is kept so the wait and wall
+   * series (whose rows and column order can differ) align by date.
    *
    * @param string $csv
    *   Raw CSV response.
    *
    * @return array
-   *   Keyed by queue name, value is array of daily floats.
+   *   Keyed by queue name, value is a map of date to float or NULL.
    */
   protected function parseCsvTimeseries(string $csv): array {
     $result = [];
@@ -379,12 +400,13 @@ class QueueMetricsService {
         continue;
       }
       // Data rows: 2026-03-01, value1, value2, ...
-      for ($i = 1; $i < count($row); $i++) {
-        if (isset($headers[$i])) {
-          $result[$headers[$i]][] = is_numeric($row[$i])
-            ? round((float) $row[$i], 2)
-            : 0;
-        }
+      $date = trim($row[0]);
+      if ($date === '') {
+        continue;
+      }
+      for ($i = 1; $i < count($headers); $i++) {
+        $value = QueueMetricsValues::parseCell($row[$i] ?? '');
+        $result[$headers[$i]][$date] = $value === NULL ? NULL : round($value, 2);
       }
     }
 

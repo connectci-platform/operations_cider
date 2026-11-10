@@ -90,6 +90,13 @@ class ResourceContentHashTest extends UnitTestCase {
     );
   }
 
+  /** The latest-data date moves nightly too and must not churn the hash. */
+  public function testQueueMetricsLastDataIsNotHashed(): void {
+    $a = ['title' => 'X', 'queue_metrics_last_data' => '2026-10-19'];
+    $b = ['title' => 'X', 'queue_metrics_last_data' => NULL];
+    $this->assertSame(ResourceContentHash::hash($a), ResourceContentHash::hash($b));
+  }
+
   /** Stripping the metrics object must not take the queue specs with it. */
   public function testQueueSpecContentIsStillHashed(): void {
     $a = [
