@@ -39,6 +39,15 @@ class ResourceGroupListTest extends KernelTestBase {
     'field_rp_datasets' => ['entity_reference_revisions', 'rp_dataset'],
     'field_rp_top_software' => ['string_long', NULL],
     'field_rp_ondemand_url' => ['link', NULL],
+    'field_rp_login_text' => ['string_long', NULL],
+    'field_rp_login_help_links' => ['link', NULL],
+    'field_rp_storage' => ['entity_reference_revisions', 'rp_storage_filesystem'],
+    'field_rp_queue_specs' => ['entity_reference_revisions', 'rp_queue_spec'],
+    'field_rp_file_transfer_text' => ['string_long', NULL],
+    'field_rp_storage_text' => ['string_long', NULL],
+    'field_rp_external_storage' => ['string_long', NULL],
+    'field_rp_datasets_text' => ['string_long', NULL],
+    'field_rp_jobs_info' => ['string_long', NULL],
   ];
 
   /**
@@ -48,6 +57,8 @@ class ResourceGroupListTest extends KernelTestBase {
     'rp_ssh_login' => 'field_rp_ssh_hostname',
     'rp_file_transfer' => 'field_rp_method',
     'rp_dataset' => 'field_rp_dataset_name',
+    'rp_storage_filesystem' => 'field_rp_directory',
+    'rp_queue_spec' => 'field_rp_queue_name',
   ];
 
   /**
@@ -122,6 +133,9 @@ class ResourceGroupListTest extends KernelTestBase {
         'entity_type' => 'node',
         'type' => $type,
       ];
+      if ($name === 'field_rp_login_help_links') {
+        $storage['cardinality'] = -1;
+      }
       if ($type === 'entity_reference_revisions') {
         $storage['cardinality'] = -1;
         $storage['settings'] = ['target_type' => 'paragraph'];
@@ -278,6 +292,131 @@ class ResourceGroupListTest extends KernelTestBase {
     $this->group($resource);
 
     $this->assertSame(['login'], $this->sections());
+  }
+
+  /**
+   * Login text on the group alone reaches a member with no login of its own.
+   */
+  public function testGroupLoginTextAloneReportsLogin(): void {
+    $resource = $this->resource();
+    $this->group($resource, ['field_rp_login_text' => 'Use your ACCESS credentials.']);
+
+    $this->assertSame(['login'], $this->sections());
+  }
+
+  /**
+   * Login help links on the group alone make the login section populated.
+   */
+  public function testGroupLoginHelpLinksAloneReportsLogin(): void {
+    $resource = $this->resource();
+    $this->group($resource, [
+      'field_rp_login_help_links' => [['uri' => 'https://help.example.edu', 'title' => 'Help']],
+    ]);
+
+    $this->assertSame(['login'], $this->sections());
+  }
+
+  /**
+   * A storage paragraph on the group reaches a member with none.
+   */
+  public function testInheritedStorageIsReported(): void {
+    $resource = $this->resource();
+    $this->group($resource, [
+      'field_rp_storage' => [$this->paragraph('rp_storage_filesystem', ['field_rp_directory' => 'Home'])],
+    ]);
+
+    $this->assertSame(['storage'], $this->sections());
+  }
+
+  /**
+   * A member's own queue spec rows count.
+   *
+   * The queue specs field is not in INHERITABLE_FIELDS, so unlike the other
+   * sections it can only come from the variant itself.
+   */
+  public function testMemberQueueSpecsAreReported(): void {
+    $resource = $this->resource([
+      'field_rp_queue_specs' => [$this->paragraph('rp_queue_spec', ['field_rp_queue_name' => 'gpu'])],
+    ]);
+    $this->group($resource);
+
+    $this->assertSame(['queue_specs'], $this->sections());
+  }
+
+  /**
+   * Queue specs set only on the group are not inherited, so not reported.
+   */
+  public function testGroupQueueSpecsAreNotInherited(): void {
+    $resource = $this->resource();
+    $this->group($resource, [
+      'field_rp_queue_specs' => [$this->paragraph('rp_queue_spec', ['field_rp_queue_name' => 'gpu'])],
+    ]);
+
+    $this->assertSame([], $this->sections());
+  }
+
+  /**
+   * Prose fields count as their section, inherited from the group or not.
+   *
+   * @dataProvider proseFieldProvider
+   */
+  public function testProseFieldReportsSection(string $field, string $section, bool $inherited): void {
+    if ($inherited) {
+      $resource = $this->resource();
+      $this->group($resource, [$field => 'Some documentation text.']);
+    }
+    else {
+      $resource = $this->resource([$field => 'Some documentation text.']);
+      $this->group($resource);
+    }
+
+    $this->assertSame([$section], $this->sections());
+  }
+
+  /**
+   * Data provider for testProseFieldReportsSection().
+   */
+  public static function proseFieldProvider(): array {
+    return [
+      'file transfer text' => ['field_rp_file_transfer_text', 'file_transfer', TRUE],
+      'storage text' => ['field_rp_storage_text', 'storage', TRUE],
+      'external storage' => ['field_rp_external_storage', 'storage', TRUE],
+      'datasets text' => ['field_rp_datasets_text', 'datasets', TRUE],
+      // Not in INHERITABLE_FIELDS, so it must be on the variant itself.
+      'jobs info (own)' => ['field_rp_jobs_info', 'queue_specs', FALSE],
+    ];
+  }
+
+  /**
+   * Whitespace-only prose is not content.
+   */
+  public function testWhitespaceOnlyProseIsNotReported(): void {
+    $resource = $this->resource([
+      'field_rp_storage_text' => "  \n\t ",
+      'field_rp_jobs_info' => '   ',
+    ]);
+    $this->group($resource, ['field_rp_datasets_text' => ' ']);
+
+    $this->assertSame([], $this->sections());
+  }
+
+  /**
+   * Sections from several variants are unioned, deduped, in SECTION_ORDER.
+   */
+  public function testVariantUnionInSectionOrder(): void {
+    $variant_a = $this->resource([
+      'field_rp_datasets' => [$this->paragraph('rp_dataset', ['field_rp_dataset_name' => 'Census'])],
+      'field_rp_ssh_login_nodes' => [$this->ssh('a.example.edu')],
+    ]);
+    $variant_b = $this->resource(['field_rp_ssh_login_nodes' => [$this->ssh('b.example.edu')]]);
+    $this->group($variant_a, [
+      'field_cider_resources' => [
+        ['target_id' => $variant_a->id()],
+        ['target_id' => $variant_b->id()],
+      ],
+    ]);
+
+    $this->assertSame(['login', 'datasets'], $this->sections());
   }
 
   /**
