@@ -12,6 +12,14 @@ operations_cider.resource_detail:
   requirements:
     _permission: 'access content'
 
+operations_cider.resource_detail_by_nid:
+  path: '/api/1.0/resources/node/{nid}'
+  defaults:
+    _controller: '\Drupal\operations_cider\Controller\ResourceDocumentationController::getResourceByNid'
+  requirements:
+    _permission: 'access content'
+    nid: '\d+'
+
 operations_cider.resource_groups_list:
   path: '/api/1.0/resource-groups'
   defaults:

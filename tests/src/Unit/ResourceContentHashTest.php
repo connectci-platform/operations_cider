@@ -78,6 +78,18 @@ class ResourceContentHashTest extends UnitTestCase {
     $this->assertSame(ResourceContentHash::hash($monday), ResourceContentHash::hash($tuesday));
   }
 
+  /** Listing visibility must NOT churn the hash. */
+  public function testListedIsNotHashed(): void {
+    $this->assertSame(
+      ResourceContentHash::hash(['title' => 'X', 'listed' => TRUE]),
+      ResourceContentHash::hash(['title' => 'X', 'listed' => FALSE]),
+    );
+    $this->assertSame(
+      ResourceContentHash::hash(['title' => 'X']),
+      ResourceContentHash::hash(['title' => 'X', 'listed' => TRUE]),
+    );
+  }
+
   /** Stripping the metrics object must not take the queue specs with it. */
   public function testQueueSpecContentIsStillHashed(): void {
     $a = [
