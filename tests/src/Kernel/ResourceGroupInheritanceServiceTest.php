@@ -171,6 +171,28 @@ class ResourceGroupInheritanceServiceTest extends KernelTestBase {
   }
 
   /**
+   * An explicitly passed group is used instead of the looked-up parent.
+   *
+   * @covers ::applyInheritance
+   */
+  public function testExplicitGroupOverridesLookup(): void {
+    $resource = $this->makeResource();
+    // Group A owns the resource by reference; group B does not.
+    $this->makeGroup($resource, [self::LINK_FIELD => 'https://group-a.example/software']);
+    $other = Node::create([
+      'type' => 'resource_group',
+      'title' => 'Other group',
+      'status' => 1,
+      self::LINK_FIELD => ['uri' => 'https://group-b.example/software', 'title' => ''],
+    ]);
+    $other->save();
+
+    $this->service()->applyInheritance($resource, $other);
+
+    $this->assertSame('https://group-b.example/software', $this->linkUri($resource, self::LINK_FIELD));
+  }
+
+  /**
    * @covers ::findParentGroup
    * @covers ::applyInheritance
    */
