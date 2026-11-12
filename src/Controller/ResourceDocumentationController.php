@@ -382,8 +382,11 @@ class ResourceDocumentationController extends ControllerBase {
    *   member CIDER variants. Used by the agent to build resource-scoped
    *   capability menus. It reflects inherited values (each variant is resolved
    *   against its group) and counts a section only when the detail endpoint
-   *   would return content for it. The login section also counts the OnDemand
-   *   URL, login text and login help links.
+   *   would return content for it. A section counts when it has paragraph rows
+   *   or its prose field is non-blank: login also counts the OnDemand URL,
+   *   login text and login help links; file transfer counts its text; storage
+   *   counts its text and external storage; queue specs count the jobs info
+   *   text; datasets count their text.
    * - `variants`: list of member CIDER variants for traceability.
    */
   public function listResourceGroups() {
@@ -428,6 +431,11 @@ class ResourceDocumentationController extends ControllerBase {
         // Resolve inheritance on a clone, as getResource() does, so the list
         // agrees with what the detail endpoint returns for this variant.
         $resolved = clone $variant;
+        // The list resolves each variant against the group it is iterating,
+        // while getResource() uses findParentGroup(). The two agree only while
+        // a resource belongs to one group, which is the same single-group
+        // assumption the detail endpoint makes (findParentGroup() logs a
+        // warning otherwise).
         $this->inheritance->applyInheritance($resolved, $group);
         $populated = array_merge($populated, $this->populatedSections($resolved));
       }
@@ -456,7 +464,10 @@ class ResourceDocumentationController extends ControllerBase {
    *
    * Expects a node that already had inheritance applied. Uses the same
    * extractors as getResource(), so a paragraph with a missing revision or only
-   * empty fields does not count.
+   * empty fields does not count. Prose fields count when non-blank, the way
+   * login text does. Queue specs also count field_rp_jobs_info because the node
+   * template renders the jobs section when queue_specs or jobs_info is present,
+   * so the list matches the page.
    *
    * @return string[]
    *   Section ids in SECTION_ORDER order.
@@ -465,9 +476,12 @@ class ResourceDocumentationController extends ControllerBase {
     $has_rows = fn(string $field, array $map): bool =>
       $node->hasField($field) && $this->getParagraphData($node, $field, $map) !== [];
 
+    $has_text = fn(string $field): bool =>
+      trim((string) $this->getScalarValue($node, $field)) !== '';
+
     $login = $has_rows('field_rp_ssh_login_nodes', self::SSH_LOGIN_MAP)
       || ($node->hasField('field_rp_ondemand_url') && !$node->get('field_rp_ondemand_url')->isEmpty())
-      || trim((string) $this->getScalarValue($node, 'field_rp_login_text')) !== ''
+      || $has_text('field_rp_login_text')
       || $this->getMultiLinkValues($node, 'field_rp_login_help_links') !== [];
 
     $top_software = FALSE;
@@ -476,13 +490,23 @@ class ResourceDocumentationController extends ControllerBase {
       $top_software = is_array($decoded) && $decoded !== [];
     }
 
+    $file_transfer = $has_rows('field_rp_file_transfer', self::FILE_TRANSFER_MAP)
+      || $has_text('field_rp_file_transfer_text');
+    $storage = $has_rows('field_rp_storage', self::STORAGE_MAP)
+      || $has_text('field_rp_storage_text')
+      || $has_text('field_rp_external_storage');
+    $queue_specs = $has_rows('field_rp_queue_specs', self::QUEUE_SPEC_MAP)
+      || $has_text('field_rp_jobs_info');
+    $datasets = $has_rows('field_rp_datasets', self::DATASET_MAP)
+      || $has_text('field_rp_datasets_text');
+
     $flags = [
       'login' => $login,
-      'file_transfer' => $has_rows('field_rp_file_transfer', self::FILE_TRANSFER_MAP),
-      'storage' => $has_rows('field_rp_storage', self::STORAGE_MAP),
-      'queue_specs' => $has_rows('field_rp_queue_specs', self::QUEUE_SPEC_MAP),
+      'file_transfer' => $file_transfer,
+      'storage' => $storage,
+      'queue_specs' => $queue_specs,
       'top_software' => $top_software,
-      'datasets' => $has_rows('field_rp_datasets', self::DATASET_MAP),
+      'datasets' => $datasets,
     ];
     return array_keys(array_filter($flags));
   }
@@ -603,7 +627,20 @@ class ResourceDocumentationController extends ControllerBase {
             $row[$key] = $field->isEmpty() ? NULL : (int) $field->value;
           }
           elseif ($field->getFieldDefinition()->getType() === 'link') {
-            $row[$key] = $field->isEmpty() ? NULL : $field->first()->getUrl()->toString();
+            if ($field->isEmpty()) {
+              $row[$key] = NULL;
+            }
+            else {
+              try {
+                $row[$key] = $field->first()->getUrl()->toString();
+              }
+              catch (\Exception $e) {
+                // Url::fromUri() throws on a malformed or scheme-less stored
+                // URI; one bad row must not 500 the whole response. Mirrors
+                // getLinkValue()'s fallback to the raw URI.
+                $row[$key] = $field->first()->uri ?: NULL;
+              }
+            }
           }
           else {
             $row[$key] = $field->value;
