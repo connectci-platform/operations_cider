@@ -484,7 +484,8 @@ class ResourceDocumentationController extends ControllerBase {
    * LISTED_DOMAIN_ID, matching views.view.rp_documentation_index.
    *
    * @param \Drupal\node\NodeInterface $node
-   *   A resource or resource group.
+   *   A resource node. Groups are filtered the same way in SQL by
+   *   listedGroupMemberNids().
    */
   private function isFlaggedListed(NodeInterface $node): bool {
     if (!$node->hasField('field_rp_listing') || !$node->hasField('field_domain_access')) {
@@ -512,15 +513,22 @@ class ResourceDocumentationController extends ControllerBase {
    */
   private function listedGroupMemberNids(): array {
     $storage = $this->entityTypeManager()->getStorage('node');
+    // Access checking is skipped on purpose. `listed` describes the
+    // documentation index on the AMP domain, not what the current host can
+    // see, and domain_access grants would otherwise hide AMP-only groups on
+    // other hosts. Only a boolean about resources the caller can already see
+    // is derived from these groups; the published filter is kept.
     $group_nids = $storage->getQuery()
       ->condition('type', 'resource_group')
       ->condition('status', 1)
-      ->accessCheck(TRUE)
+      ->condition('field_rp_listing', 1)
+      ->condition('field_domain_access', self::LISTED_DOMAIN_ID)
+      ->accessCheck(FALSE)
       ->execute();
 
     $members = [];
     foreach ($storage->loadMultiple($group_nids) as $group) {
-      if (!$this->isFlaggedListed($group) || !$group->hasField('field_cider_resources')) {
+      if (!$group->hasField('field_cider_resources')) {
         continue;
       }
       foreach ($group->get('field_cider_resources') as $item) {

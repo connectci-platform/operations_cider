@@ -37,7 +37,7 @@ class ResourceListedAndByNidTest extends KernelTestBase {
   private const OTHER_DOMAIN = 'other_example_org';
 
   /**
-   * Add one field storage and its per-bundle configs.
+   * {@inheritdoc}
    */
   protected function setUp(): void {
     parent::setUp();
@@ -128,7 +128,7 @@ class ResourceListedAndByNidTest extends KernelTestBase {
   }
 
   /**
-   * Create a published resource node.
+   * Add one field storage and its per-bundle configs.
    */
   private function addField(string $name, string $type, array $bundles, array $storage = []): void {
     FieldStorageConfig::create([
@@ -146,7 +146,7 @@ class ResourceListedAndByNidTest extends KernelTestBase {
   }
 
   /**
-   * Create a published resource group.
+   * Create a published resource node.
    */
   private function makeResource(string $title, array $values = []): Node {
     $node = Node::create($values + [
@@ -159,7 +159,7 @@ class ResourceListedAndByNidTest extends KernelTestBase {
   }
 
   /**
-   * Get the controller under test.
+   * Create a published resource group.
    */
   private function makeGroup(array $members, array $values = []): Node {
     $node = Node::create($values + [
@@ -173,14 +173,14 @@ class ResourceListedAndByNidTest extends KernelTestBase {
   }
 
   /**
-   * Get the `listed` value per nid from the list endpoint.
+   * Get the controller under test.
    */
   private function controller(): ResourceDocumentationController {
     return ResourceDocumentationController::create($this->container);
   }
 
   /**
-   * The `listed` value per nid from the list endpoint.
+   * Get the `listed` value per nid from the list endpoint.
    */
   private function listedMap(): array {
     $request = Request::create('/api/1.0/resources', 'GET', ['documented' => 'false']);
@@ -308,6 +308,21 @@ class ResourceListedAndByNidTest extends KernelTestBase {
       $this->assertSame(404, $response->getStatusCode(), "nid $nid");
       $this->assertSame(['error' => 'Resource not found'], json_decode($response->getContent(), TRUE));
     }
+  }
+
+  /**
+   * Both endpoints invalidate on resource group changes.
+   */
+  public function testResponsesCarryResourceGroupListCacheTag(): void {
+    $node = $this->makeResource('Tagged', ['field_cider_resource_id' => 'test-tag-1']);
+
+    $request = Request::create('/api/1.0/resources', 'GET', ['documented' => 'false']);
+    $list = $this->controller()->listResources($request);
+    $this->assertContains('node_list:resource_group', $list->getCacheableMetadata()->getCacheTags());
+
+    $by_nid = $this->controller()->getResourceByNid($node->id());
+    $this->assertSame(200, $by_nid->getStatusCode());
+    $this->assertContains('node_list:resource_group', $by_nid->getCacheableMetadata()->getCacheTags());
   }
 
 }
