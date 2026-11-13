@@ -22,6 +22,16 @@ final class QueueMetricsFreshness {
   public const STALE_AFTER_DAYS = 45;
 
   /**
+   * Label key: the date is the last day XDMoD reported data.
+   */
+  public const LABEL_DATA_THROUGH = 'data_through';
+
+  /**
+   * Label key: the date is only when the metrics were last fetched.
+   */
+  public const LABEL_UPDATED = 'updated';
+
+  /**
    * Whether metrics last refreshed on $updated are stale at $now.
    *
    * @param string|null $updated
@@ -42,11 +52,57 @@ final class QueueMetricsFreshness {
     if ($updated === NULL || $updated === '') {
       return FALSE;
     }
-    $date = \DateTimeImmutable::createFromFormat('!Y-m-d', $updated, new \DateTimeZone('UTC'));
-    if ($date === FALSE || $date->format('Y-m-d') !== $updated) {
+    $date = self::parseDate($updated);
+    if ($date === NULL) {
       return FALSE;
     }
     return ($now - $date->getTimestamp()) > $threshold_days * 86400;
+  }
+
+  /**
+   * Picks the date the theme should judge staleness by, and how to label it.
+   *
+   * Prefers `last_data`, the last day XDMoD reported data. It is NULL when the
+   * two timeseries requests fail but the aggregates succeed, and absent from
+   * blobs written before the key existed. In both cases, and when it isn't a
+   * strict YYYY-MM-DD date, fall back to `updated`, the fetch date, with a
+   * different label so the note doesn't claim data through that day.
+   *
+   * @param array<string, mixed> $blob
+   *   The decoded field_rp_queue_metrics blob.
+   *
+   * @return array
+   *   The date and label.
+   *
+   * @phpstan-return array{date: string|null, label: string}
+   */
+  public static function freshnessDate(array $blob): array {
+    $last_data = $blob['last_data'] ?? NULL;
+    if (is_string($last_data) && self::parseDate($last_data) !== NULL) {
+      return ['date' => $last_data, 'label' => self::LABEL_DATA_THROUGH];
+    }
+    $updated = $blob['updated'] ?? NULL;
+    return [
+      'date' => is_string($updated) && $updated !== '' ? $updated : NULL,
+      'label' => self::LABEL_UPDATED,
+    ];
+  }
+
+  /**
+   * Parses a strict YYYY-MM-DD date in UTC.
+   *
+   * @param string $value
+   *   The candidate date.
+   *
+   * @return \DateTimeImmutable|null
+   *   The date at midnight UTC, or NULL when it isn't a real YYYY-MM-DD date.
+   */
+  private static function parseDate(string $value): ?\DateTimeImmutable {
+    $date = \DateTimeImmutable::createFromFormat('!Y-m-d', $value, new \DateTimeZone('UTC'));
+    if ($date === FALSE || $date->format('Y-m-d') !== $value) {
+      return NULL;
+    }
+    return $date;
   }
 
 }
