@@ -7,6 +7,7 @@ use Drupal\field\Entity\FieldStorageConfig;
 use Drupal\KernelTests\KernelTestBase;
 use Drupal\node\Entity\Node;
 use Drupal\node\Entity\NodeType;
+use Drupal\operations_cider\Controller\ResourceDocumentationController;
 
 /**
  * Covers the documentation links and queue metrics on the resource detail API.
@@ -21,7 +22,8 @@ use Drupal\node\Entity\NodeType;
 class ResourceDocumentationPayloadTest extends KernelTestBase {
 
   protected static $modules = [
-    'system', 'user', 'node', 'field', 'text', 'link', 'key', 'operations_cider',
+    'system', 'user', 'node', 'field', 'text', 'link', 'key', 'file',
+    'entity_reference_revisions', 'paragraphs', 'operations_cider',
   ];
 
   /**
@@ -90,6 +92,55 @@ class ResourceDocumentationPayloadTest extends KernelTestBase {
       'entity_type' => 'node',
       'bundle' => 'access_active_resources_from_cid',
     ])->save();
+
+    // getResource() reads these directly (no hasField() guard), so they must
+    // exist for the endpoint test; their values are irrelevant here.
+    $endpointFields = [
+      'field_access_global_resource_id',
+      'field_cider_resource_type',
+      'field_access_org_name',
+      'field_cider_latest_status',
+      'field_rp_description',
+      'field_rp_mfa_required',
+      'field_rp_account_required',
+      'field_rp_top_software',
+      'field_rp_ood_software',
+    ];
+    // getParagraphData() loads from the paragraph storage, so the module is
+    // enabled and the reference fields exist; none holds a paragraph.
+    $paragraphFields = [
+      'field_rp_ssh_login_nodes',
+      'field_rp_file_transfer',
+      'field_rp_storage',
+      'field_rp_queue_specs',
+      'field_rp_datasets',
+    ];
+    foreach ($paragraphFields as $name) {
+      FieldStorageConfig::create([
+        'field_name' => $name,
+        'entity_type' => 'node',
+        'type' => 'entity_reference_revisions',
+        'cardinality' => -1,
+        'settings' => ['target_type' => 'paragraph'],
+      ])->save();
+      FieldConfig::create([
+        'field_name' => $name,
+        'entity_type' => 'node',
+        'bundle' => 'access_active_resources_from_cid',
+      ])->save();
+    }
+    foreach ($endpointFields as $name) {
+      FieldStorageConfig::create([
+        'field_name' => $name,
+        'entity_type' => 'node',
+        'type' => 'string_long',
+      ])->save();
+      FieldConfig::create([
+        'field_name' => $name,
+        'entity_type' => 'node',
+        'bundle' => 'access_active_resources_from_cid',
+      ])->save();
+    }
 
     FieldStorageConfig::create([
       'field_name' => 'field_rp_queue_metrics',
@@ -235,9 +286,7 @@ class ResourceDocumentationPayloadTest extends KernelTestBase {
   }
 
   /**
-   * Decoding keeps a null wait_time as null rather than dropping it or using 0.
-   *
-   * The encoded response is pinned by the Cypress resource-api test.
+   * The endpoint keeps a null wait_time as JSON null, not dropping it or 0.
    */
   public function testNullWaitTimeEncodesAsJsonNull(): void {
     $resource = $this->makeResourceWithMetrics([
@@ -245,9 +294,18 @@ class ResourceDocumentationPayloadTest extends KernelTestBase {
       'last_data' => NULL,
       'queues' => ['wholenode' => ['wait_time' => NULL, 'job_count' => 5]],
     ]);
-    $decoded = $this->decodeMetrics($resource);
-    $json = json_encode((object) $decoded['queues']);
-    $this->assertSame('{"wholenode":{"wait_time":null,"job_count":5}}', $json);
+    $resource->set('field_cider_resource_id', 'metrics.example')->save();
+
+    $controller = ResourceDocumentationController::create($this->container);
+    $response = $controller->getResource('metrics.example');
+    $this->assertSame(200, $response->getStatusCode());
+    $payload = json_decode($response->getContent(), TRUE);
+
+    $this->assertArrayHasKey('wholenode', $payload['queue_metrics']);
+    $queue = $payload['queue_metrics']['wholenode'];
+    $this->assertArrayHasKey('wait_time', $queue);
+    $this->assertNull($queue['wait_time']);
+    $this->assertSame(5, $queue['job_count']);
   }
 
   /**

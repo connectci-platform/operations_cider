@@ -186,6 +186,52 @@ class QueueMetricsServiceTest extends KernelTestBase {
   }
 
   /**
+   * Failed timeseries requests store last_data NULL but keep the aggregates.
+   *
+   * The timeseries queries swallow non-auth errors and return nothing, so the
+   * run has no daily rows to date. The blob is still written (replacing the
+   * previous one) with last_data NULL; the theme then falls back to `updated`
+   * via QueueMetricsFreshness::freshnessDate.
+   */
+  public function testTimeseriesFailureStoresNullLastData(): void {
+    $node = $this->createResource(1, 'a.example');
+    $previous = json_encode([
+      'updated' => '2026-10-01',
+      'last_data' => '2026-09-30',
+      'resource' => 'a.example',
+      'queues' => [],
+    ]);
+    $node->set('field_rp_queue_metrics', $previous)->save();
+
+    $aggregate = $this->xdmodCsv(['Stat'], ['wholenode,4.5'], FALSE);
+    $jobs = $this->xdmodCsv(['Number of Jobs Ended'], ['wholenode,12'], FALSE);
+    // Requests are served in order: wait, wall and job count aggregates, then
+    // the wait and wall timeseries. The index is global across resources.
+    $responses = [
+      fn() => new Response(200, ['Content-Type' => 'text/csv'], $aggregate),
+      fn() => new Response(200, ['Content-Type' => 'text/csv'], $aggregate),
+      fn() => new Response(200, ['Content-Type' => 'text/csv'], $jobs),
+      fn() => new Response(500),
+      fn() => new Response(500),
+    ];
+    $this->service($this->mockClient($responses))->updateAll();
+
+    $stored = $this->storedMetrics($node->id());
+    $this->assertNotSame($previous, $stored);
+    $blob = json_decode($stored, TRUE);
+    $this->assertArrayHasKey('last_data', $blob);
+    $this->assertNull($blob['last_data']);
+    $this->assertSame(date('Y-m-d'), $blob['updated']);
+    $queue = $blob['queues']['wholenode'];
+    $this->assertSame(4.5, $queue['wait_time']);
+    $this->assertSame(4.5, $queue['wall_time']);
+    $this->assertSame(12, $queue['job_count']);
+    $this->assertSame([], $queue['daily_dates']);
+    $this->assertSame([], $queue['daily_wait']);
+    $this->assertSame([], $queue['daily_wall']);
+  }
+
+  /**
    * The last_data date is the last day XDMoD has rows for, not the fetch date.
    */
   public function testAnvilLastDataIsLastCsvRow(): void {
