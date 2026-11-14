@@ -336,9 +336,13 @@ class ResourceDocumentationController extends ControllerBase {
     // already read. Join on the row's `name`.
     //
     // Refreshed nightly and therefore excluded from the content hash — see
-    // ResourceContentHash::STRIP_TOP_LEVEL.
+    // ResourceContentHash::STRIP_TOP_LEVEL. `queue_metrics_updated` is the
+    // fetch date; `queue_metrics_last_data` is the latest day XDMoD actually
+    // reported data for (NULL for legacy blobs or when there is none), so a
+    // consumer can tell a fresh fetch of old data from current data.
     $metrics = $this->decodeQueueMetrics($node);
     $data['queue_metrics_updated'] = $metrics['updated'];
+    $data['queue_metrics_last_data'] = $metrics['last_data'];
     // Cast so an empty map encodes as {} rather than []. PHP renders an empty
     // array as a JSON list, and most resources have no metrics at all, so
     // without this the common case contradicts the documented object type and
@@ -573,27 +577,42 @@ class ResourceDocumentationController extends ControllerBase {
   }
 
   /**
-   * Decode field_rp_queue_metrics into its updated date and per-queue map.
+   * Decode field_rp_queue_metrics into its dates and per-queue map.
    *
    * Returns nulls and an empty map for missing, empty, or malformed JSON, so a
    * bad blob degrades to "no metrics" rather than breaking the payload.
+   * `last_data` is only passed through when it is a strict YYYY-MM-DD date;
+   * legacy blobs without the key yield NULL.
    *
-   * @return array{updated: string|null, queues: array}
+   * @return array{updated: string|null, last_data: string|null, queues: array}
+   *   The fetch date, the latest data date, and the per-queue map.
    */
   private function decodeQueueMetrics($node): array {
     if (!$node->hasField('field_rp_queue_metrics')) {
-      return ['updated' => NULL, 'queues' => []];
+      return ['updated' => NULL, 'last_data' => NULL, 'queues' => []];
     }
     $raw = $node->get('field_rp_queue_metrics')->value;
     $decoded = $raw ? json_decode($raw, TRUE) : NULL;
     if (!is_array($decoded)) {
-      return ['updated' => NULL, 'queues' => []];
+      return ['updated' => NULL, 'last_data' => NULL, 'queues' => []];
     }
     $queues = $decoded['queues'] ?? NULL;
     return [
       'updated' => $decoded['updated'] ?? NULL,
+      'last_data' => $this->validDate($decoded['last_data'] ?? NULL),
       'queues' => is_array($queues) ? $queues : [],
     ];
+  }
+
+  /**
+   * Return the value only if it is a real YYYY-MM-DD date, else NULL.
+   */
+  private function validDate(mixed $value): ?string {
+    if (!is_string($value)) {
+      return NULL;
+    }
+    $date = \DateTimeImmutable::createFromFormat('!Y-m-d', $value);
+    return ($date && $date->format('Y-m-d') === $value) ? $value : NULL;
   }
 
   /**
@@ -704,6 +723,11 @@ class ResourceDocumentationController extends ControllerBase {
   private function buildQueueSummary(array $queue): ?string {
     $parts = [];
 
+    // CIDER stores the text "None" for CPU-only queues; treat it as empty.
+    if (is_string($queue['gpu_type'] ?? NULL) && strcasecmp(trim($queue['gpu_type']), 'None') === 0) {
+      $queue['gpu_type'] = '';
+    }
+
     // Render GPU type/vRAM even when the per-node count is absent; the count
     // is an optional prefix.
     if (!empty($queue['gpu_count']) || !empty($queue['gpu_type']) || !empty($queue['gpu_vram'])) {
@@ -721,7 +745,8 @@ class ResourceDocumentationController extends ControllerBase {
     }
 
     if (isset($queue['node_count']) && $queue['node_count'] !== NULL && $queue['node_count'] !== '') {
-      $parts[] = (int) $queue['node_count'] . ' nodes';
+      $nodes = (int) $queue['node_count'];
+      $parts[] = $nodes . ($nodes === 1 ? ' node' : ' nodes');
     }
 
     if (!empty($queue['cpu_count']) && !empty($queue['cpu_type'])) {

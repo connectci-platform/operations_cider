@@ -7,6 +7,7 @@ use Drupal\field\Entity\FieldStorageConfig;
 use Drupal\KernelTests\KernelTestBase;
 use Drupal\node\Entity\Node;
 use Drupal\node\Entity\NodeType;
+use Drupal\operations_cider\Controller\ResourceDocumentationController;
 
 /**
  * Covers the documentation links and queue metrics on the resource detail API.
@@ -21,7 +22,8 @@ use Drupal\node\Entity\NodeType;
 class ResourceDocumentationPayloadTest extends KernelTestBase {
 
   protected static $modules = [
-    'system', 'user', 'node', 'field', 'text', 'link', 'key', 'operations_cider',
+    'system', 'user', 'node', 'field', 'text', 'link', 'key', 'file',
+    'entity_reference_revisions', 'paragraphs', 'operations_cider',
   ];
 
   /**
@@ -90,6 +92,55 @@ class ResourceDocumentationPayloadTest extends KernelTestBase {
       'entity_type' => 'node',
       'bundle' => 'access_active_resources_from_cid',
     ])->save();
+
+    // getResource() reads these directly (no hasField() guard), so they must
+    // exist for the endpoint test; their values are irrelevant here.
+    $endpointFields = [
+      'field_access_global_resource_id',
+      'field_cider_resource_type',
+      'field_access_org_name',
+      'field_cider_latest_status',
+      'field_rp_description',
+      'field_rp_mfa_required',
+      'field_rp_account_required',
+      'field_rp_top_software',
+      'field_rp_ood_software',
+    ];
+    // getParagraphData() loads from the paragraph storage, so the module is
+    // enabled and the reference fields exist; none holds a paragraph.
+    $paragraphFields = [
+      'field_rp_ssh_login_nodes',
+      'field_rp_file_transfer',
+      'field_rp_storage',
+      'field_rp_queue_specs',
+      'field_rp_datasets',
+    ];
+    foreach ($paragraphFields as $name) {
+      FieldStorageConfig::create([
+        'field_name' => $name,
+        'entity_type' => 'node',
+        'type' => 'entity_reference_revisions',
+        'cardinality' => -1,
+        'settings' => ['target_type' => 'paragraph'],
+      ])->save();
+      FieldConfig::create([
+        'field_name' => $name,
+        'entity_type' => 'node',
+        'bundle' => 'access_active_resources_from_cid',
+      ])->save();
+    }
+    foreach ($endpointFields as $name) {
+      FieldStorageConfig::create([
+        'field_name' => $name,
+        'entity_type' => 'node',
+        'type' => 'string_long',
+      ])->save();
+      FieldConfig::create([
+        'field_name' => $name,
+        'entity_type' => 'node',
+        'bundle' => 'access_active_resources_from_cid',
+      ])->save();
+    }
 
     FieldStorageConfig::create([
       'field_name' => 'field_rp_queue_metrics',
@@ -203,6 +254,87 @@ class ResourceDocumentationPayloadTest extends KernelTestBase {
     }
   }
 
+  /**
+   * A valid last_data passes through; updated stays the fetch date.
+   */
+  public function testLastDataIsDecodedSeparatelyFromUpdated(): void {
+    $resource = $this->makeResourceWithMetrics([
+      'updated' => '2026-11-10',
+      'last_data' => '2026-10-19',
+      'queues' => [],
+    ]);
+    $decoded = $this->decodeMetrics($resource);
+    $this->assertSame('2026-10-19', $decoded['last_data']);
+    $this->assertSame('2026-11-10', $decoded['updated']);
+  }
+
+  /**
+   * Legacy blobs and malformed last_data values decode to NULL.
+   */
+  public function testMissingOrMalformedLastDataIsNull(): void {
+    $blobs = [
+      'legacy' => ['updated' => '2026-11-10', 'queues' => []],
+      'text' => ['updated' => '2026-11-10', 'last_data' => '2 hours ago', 'queues' => []],
+      'int' => ['updated' => '2026-11-10', 'last_data' => 123, 'queues' => []],
+      'impossible' => ['updated' => '2026-11-10', 'last_data' => '2026-13-40', 'queues' => []],
+    ];
+    foreach ($blobs as $label => $blob) {
+      $decoded = $this->decodeMetrics($this->makeResourceWithMetrics($blob));
+      $this->assertNull($decoded['last_data'], "Case '$label' should yield NULL.");
+      $this->assertSame('2026-11-10', $decoded['updated']);
+    }
+  }
+
+  /**
+   * The endpoint keeps a null wait_time as JSON null, not dropping it or 0.
+   */
+  public function testNullWaitTimeEncodesAsJsonNull(): void {
+    $resource = $this->makeResourceWithMetrics([
+      'updated' => '2026-11-10',
+      'last_data' => NULL,
+      'queues' => ['wholenode' => ['wait_time' => NULL, 'job_count' => 5]],
+    ]);
+    $resource->set('field_cider_resource_id', 'metrics.example')->save();
+
+    $controller = ResourceDocumentationController::create($this->container);
+    $response = $controller->getResource('metrics.example');
+    $this->assertSame(200, $response->getStatusCode());
+    $payload = json_decode($response->getContent(), TRUE);
+
+    $this->assertArrayHasKey('wholenode', $payload['queue_metrics']);
+    $queue = $payload['queue_metrics']['wholenode'];
+    $this->assertArrayHasKey('wait_time', $queue);
+    $this->assertNull($queue['wait_time']);
+    $this->assertSame(5, $queue['job_count']);
+  }
+
+  /**
+   * The text "None" for gpu_type is dropped; a single node is singular.
+   */
+  public function testQueueSummaryHandlesNoneGpuAndSingularNode(): void {
+    $this->assertSame('2 nodes', $this->summary(['gpu_type' => 'None', 'node_count' => 2]));
+    $this->assertSame('2 nodes', $this->summary(['gpu_type' => ' none ', 'node_count' => 2]));
+    $gpu = ['gpu_count' => 2, 'gpu_type' => 'None', 'gpu_vram' => 80, 'node_count' => 1];
+    $this->assertSame('2 (80 GB vRAM), 1 node', $this->summary($gpu));
+    $one = $this->summary(['node_count' => 1]);
+    $this->assertStringContainsString('1 node', $one);
+    $this->assertStringNotContainsString('1 nodes', $one);
+    $a100 = ['gpu_count' => 4, 'gpu_type' => 'NVIDIA A100', 'node_count' => 2];
+    $this->assertSame('4 NVIDIA A100, 2 nodes', $this->summary($a100));
+  }
+
+  /**
+   * Call the controller's own queue summary builder.
+   */
+  private function summary(array $queue): ?string {
+    $controller = \Drupal::classResolver(
+      'Drupal\operations_cider\Controller\ResourceDocumentationController'
+    );
+    $method = new \ReflectionMethod($controller, 'buildQueueSummary');
+    $method->setAccessible(TRUE);
+    return $method->invoke($controller, $queue);
+  }
+
   private function makeResourceWithMetrics(array $metrics): Node {
     $node = Node::create([
       'type' => 'access_active_resources_from_cid',
@@ -246,6 +378,8 @@ class ResourceDocumentationPayloadTest extends KernelTestBase {
     $decoded = $this->decodeMetrics($resource);
     $this->assertSame([], $decoded['queues']);
     $this->assertNull($decoded['updated']);
+    $this->assertArrayHasKey('last_data', $decoded);
+    $this->assertNull($decoded['last_data']);
   }
 
   /**

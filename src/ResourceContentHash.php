@@ -24,15 +24,23 @@ final class ResourceContentHash {
    * the absolute flag — they are stored/external or host-relative and stable, so
    * they stay in the hash as content. `last_modified` is the timestamp we
    * explicitly want excluded. `queue_metrics` holds XDMoD wait/wall figures
-   * refreshed nightly, and `queue_metrics_updated` is the date of that refresh;
-   * both move when nothing a consumer would call a content change has happened,
-   * so leaving them in would churn the fingerprint daily and defeat the change
-   * detection it exists for. `listed` says whether the resource appears on
-   * /documentation/resources (its own listing box or a listed group). It is
-   * visibility, not documentation content, and a group toggle would otherwise
-   * churn every member's fingerprint.
+   * refreshed nightly, `queue_metrics_updated` is the date of that refresh,
+   * and `queue_metrics_last_data` is the latest day with reported data. All
+   * three move when nothing a consumer would call a content change has
+   * happened, so leaving them in would churn the fingerprint daily and defeat
+   * the change detection it exists for. `listed` says whether the resource
+   * appears on /documentation/resources (its own listing box or a listed
+   * group). It is visibility, not documentation content, and a group toggle
+   * would otherwise churn every member's fingerprint.
    */
-  private const STRIP_TOP_LEVEL = ['last_modified', 'url', 'queue_metrics', 'queue_metrics_updated', 'listed'];
+  private const STRIP_TOP_LEVEL = [
+    'last_modified',
+    'url',
+    'queue_metrics',
+    'queue_metrics_updated',
+    'queue_metrics_last_data',
+    'listed',
+  ];
 
   /**
    * Multi-value link-list fields whose entries carry a host-absolute `url`

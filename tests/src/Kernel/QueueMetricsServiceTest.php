@@ -165,4 +165,155 @@ class QueueMetricsServiceTest extends KernelTestBase {
     $this->addToAssertionCount(1);
   }
 
+  /**
+   * Decodes the stored blob of a node.
+   */
+  protected function storedBlob(int $nid): array {
+    return json_decode($this->storedMetrics($nid), TRUE);
+  }
+
+  /**
+   * Asserts the parallel daily lists of every queue have the same length.
+   */
+  protected function assertDailyAligned(array $blob): void {
+    foreach ($blob['queues'] as $name => $queue) {
+      $this->assertCount(count($queue['daily_dates']), $queue['daily_wait'], "$name wait");
+      $this->assertCount(count($queue['daily_dates']), $queue['daily_wall'], "$name wall");
+      $sorted = $queue['daily_dates'];
+      sort($sorted);
+      $this->assertSame($sorted, $queue['daily_dates'], "$name dates ascending");
+    }
+  }
+
+  /**
+   * Failed timeseries requests store last_data NULL but keep the aggregates.
+   *
+   * The timeseries queries swallow non-auth errors and return nothing, so the
+   * run has no daily rows to date. The blob is still written (replacing the
+   * previous one) with last_data NULL; the theme then falls back to `updated`
+   * via QueueMetricsFreshness::freshnessDate.
+   */
+  public function testTimeseriesFailureStoresNullLastData(): void {
+    $node = $this->createResource(1, 'a.example');
+    $previous = json_encode([
+      'updated' => '2026-10-01',
+      'last_data' => '2026-09-30',
+      'resource' => 'a.example',
+      'queues' => [],
+    ]);
+    $node->set('field_rp_queue_metrics', $previous)->save();
+
+    $aggregate = $this->xdmodCsv(['Stat'], ['wholenode,4.5'], FALSE);
+    $jobs = $this->xdmodCsv(['Number of Jobs Ended'], ['wholenode,12'], FALSE);
+    // Requests are served in order: wait, wall and job count aggregates, then
+    // the wait and wall timeseries. The index is global across resources.
+    $responses = [
+      fn() => new Response(200, ['Content-Type' => 'text/csv'], $aggregate),
+      fn() => new Response(200, ['Content-Type' => 'text/csv'], $aggregate),
+      fn() => new Response(200, ['Content-Type' => 'text/csv'], $jobs),
+      fn() => new Response(500),
+      fn() => new Response(500),
+    ];
+    $this->service($this->mockClient($responses))->updateAll();
+
+    $stored = $this->storedMetrics($node->id());
+    $this->assertNotSame($previous, $stored);
+    $blob = json_decode($stored, TRUE);
+    $this->assertArrayHasKey('last_data', $blob);
+    $this->assertNull($blob['last_data']);
+    $this->assertSame(date('Y-m-d'), $blob['updated']);
+    $queue = $blob['queues']['wholenode'];
+    $this->assertSame(4.5, $queue['wait_time']);
+    $this->assertSame(4.5, $queue['wall_time']);
+    $this->assertSame(12, $queue['job_count']);
+    $this->assertSame([], $queue['daily_dates']);
+    $this->assertSame([], $queue['daily_wait']);
+    $this->assertSame([], $queue['daily_wall']);
+  }
+
+  /**
+   * The last_data date is the last day XDMoD has rows for, not the fetch date.
+   */
+  public function testAnvilLastDataIsLastCsvRow(): void {
+    $node = $this->createResource(3097, 'anvil.example');
+    $this->service($this->fixtureClient([3097 => $this->anvilFixtures()]))->updateAll();
+
+    $blob = $this->storedBlob($node->id());
+    $this->assertSame('2026-10-19', $blob['last_data']);
+    $this->assertSame(date('Y-m-d'), $blob['updated']);
+    $this->assertNotSame($blob['updated'], $blob['last_data']);
+    $this->assertDailyAligned($blob);
+    $this->assertCount(5, $blob['queues']['wholenode']['daily_dates']);
+    $this->assertSame('2026-10-19', end($blob['queues']['wholenode']['daily_dates']));
+  }
+
+  /**
+   * Values land on the right queue although column order differs per CSV.
+   */
+  public function testColumnOrderDifferencesAreMatchedByQueueName(): void {
+    $node = $this->createResource(3097, 'anvil.example');
+    $this->service($this->fixtureClient([3097 => $this->anvilFixtures()]))->updateAll();
+
+    $queues = $this->storedBlob($node->id())['queues'];
+    $this->assertEquals(31.4847, $queues['wholenode']['wait_time']);
+    $this->assertEquals(10.7457, $queues['wholenode']['wall_time']);
+    $this->assertSame(5666, $queues['wholenode']['job_count']);
+    $this->assertEquals(2.1, $queues['shared']['wall_time']);
+    $this->assertSame(262958, $queues['shared']['job_count']);
+    // Wait series lists wholenode first, wall series lists shared first.
+    $this->assertEquals(22.92, $queues['wholenode']['daily_wait'][0]);
+    $this->assertEquals(2.5, $queues['shared']['daily_wall'][0]);
+    $this->assertEquals(11.1, $queues['wholenode']['daily_wall'][0]);
+    $this->assertEquals(30.96, $queues['shared']['daily_wait'][0]);
+    $this->assertEquals(0.28, $queues['debug']['daily_wall'][4]);
+  }
+
+  /**
+   * Delta has no wait data: waits are NULL, walls are kept.
+   */
+  public function testDeltaZeroWaitsAreNull(): void {
+    $node = $this->createResource(3031, 'delta.example');
+    $this->service($this->fixtureClient([3031 => $this->deltaFixtures()]))->updateAll();
+
+    $blob = $this->storedBlob($node->id());
+    $this->assertDailyAligned($blob);
+    foreach ($blob['queues'] as $name => $queue) {
+      $this->assertNull($queue['wait_time'], "$name wait_time");
+      $this->assertSame([NULL, NULL, NULL, NULL], $queue['daily_wait'], "$name daily_wait");
+      $this->assertNotNull($queue['wall_time'], "$name wall_time");
+    }
+    // Wall data exists through the last row.
+    $this->assertSame('2026-11-09', $blob['last_data']);
+  }
+
+  /**
+   * A bare 0 daily wall is no data; a decimal zero stays a real zero.
+   */
+  public function testBareZeroWallIsNull(): void {
+    $node = $this->createResource(3031, 'delta.example');
+    $this->service($this->fixtureClient([3031 => $this->deltaFixtures()]))->updateAll();
+
+    $queues = $this->storedBlob($node->id())['queues'];
+    $this->assertSame([0.5, NULL, NULL, NULL], $queues['cpu-preempt']['daily_wall']);
+    $this->assertEquals([1.3, 1.1, 1.2, 0.9], $queues['cpu']['daily_wall']);
+  }
+
+  /**
+   * A bare 0 aggregate cell is NULL, not 0.0.
+   */
+  public function testBareZeroAggregateIsNull(): void {
+    $fixtures = $this->deltaFixtures();
+    $fixtures['avg_wallduration_hours|aggregate'] = $this->xdmodCsv(
+      ['Wall Hours: Per Job'],
+      ['cpu,1.20000000', 'cpu-preempt,0'],
+      FALSE,
+    );
+    $node = $this->createResource(3031, 'delta.example');
+    $this->service($this->fixtureClient([3031 => $fixtures]))->updateAll();
+
+    $queues = $this->storedBlob($node->id())['queues'];
+    $this->assertNull($queues['cpu-preempt']['wall_time']);
+    $this->assertEquals(1.2, $queues['cpu']['wall_time']);
+  }
+
 }

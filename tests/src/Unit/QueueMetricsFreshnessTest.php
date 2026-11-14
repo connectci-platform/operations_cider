@@ -47,4 +47,35 @@ class QueueMetricsFreshnessTest extends UnitTestCase {
     ];
   }
 
+  /**
+   * Prefers last_data, otherwise falls back to the fetch date.
+   *
+   * @covers ::freshnessDate
+   * @dataProvider providerFreshnessDate
+   */
+  public function testFreshnessDate(array $blob, ?string $date, string $label): void {
+    $this->assertSame(
+      ['date' => $date, 'label' => $label],
+      QueueMetricsFreshness::freshnessDate($blob)
+    );
+  }
+
+  /**
+   * Data provider for testFreshnessDate().
+   */
+  public static function providerFreshnessDate(): array {
+    $through = QueueMetricsFreshness::LABEL_DATA_THROUGH;
+    $updated = QueueMetricsFreshness::LABEL_UPDATED;
+    return [
+      'legacy blob without last_data' => [['updated' => '2026-11-10'], '2026-11-10', $updated],
+      'valid last_data' => [['updated' => '2026-11-10', 'last_data' => '2026-10-20'], '2026-10-20', $through],
+      'null last_data' => [['updated' => '2026-11-10', 'last_data' => NULL], '2026-11-10', $updated],
+      'relative text last_data' => [['updated' => '2026-11-10', 'last_data' => '2 hours ago'], '2026-11-10', $updated],
+      'impossible last_data' => [['updated' => '2026-11-10', 'last_data' => '2026-13-40'], '2026-11-10', $updated],
+      'non-string last_data' => [['updated' => '2026-11-10', 'last_data' => 123], '2026-11-10', $updated],
+      'neither date' => [[], NULL, $updated],
+      'empty updated' => [['updated' => '', 'last_data' => NULL], NULL, $updated],
+    ];
+  }
+
 }
