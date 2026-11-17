@@ -7,6 +7,7 @@ use Drupal\Core\Cache\CacheableJsonResponse;
 use Drupal\Core\Cache\CacheableMetadata;
 use Drupal\Core\Controller\ControllerBase;
 use Drupal\node\NodeInterface;
+use Drupal\operations_cider\NodeTypeReferences;
 use Drupal\operations_cider\ResourceContentHash;
 use Drupal\operations_cider\Service\OodSoftwareService;
 use Drupal\operations_cider\Service\ResourceGroupInheritanceService;
@@ -292,6 +293,13 @@ class ResourceDocumentationController extends ControllerBase {
 
     $changed = $node->getChangedTime();
 
+    // Node types and queues are the source of truth for compute hardware.
+    // queue_specs stays in the payload in its old per-row shape: derived from
+    // them when the resource has node types, read from the old queue hardware
+    // fields otherwise (before the migration has run for that resource).
+    $nodeTypes = $this->getNodeTypeData($node);
+    $queueRows = $this->getQueueRows($node);
+
     $data = [
       'nid' => (int) $node->id(),
       'title' => operations_cider_resource_display_name($node),
@@ -323,7 +331,11 @@ class ResourceDocumentationController extends ControllerBase {
       'support_links' => $this->getMultiLinkValues($node, 'field_rp_support_links'),
       'file_transfer' => $this->getParagraphData($node, 'field_rp_file_transfer', self::FILE_TRANSFER_MAP),
       'storage' => $this->getParagraphData($node, 'field_rp_storage', self::STORAGE_MAP),
-      'queue_specs' => $this->getParagraphData($node, 'field_rp_queue_specs', self::QUEUE_SPEC_MAP),
+      'queue_specs' => $nodeTypes
+        ? $this->deriveQueueSpecs($queueRows, $nodeTypes)
+        : $this->getParagraphData($node, 'field_rp_queue_specs', self::QUEUE_SPEC_MAP),
+      'node_types' => $nodeTypes,
+      'queues' => $this->buildQueues($queueRows),
       'datasets' => $this->getParagraphData($node, 'field_rp_datasets', self::DATASET_MAP),
     ];
 
@@ -358,6 +370,10 @@ class ResourceDocumentationController extends ControllerBase {
       $queue['summary'] = $this->buildQueueSummary($queue);
     }
     unset($queue);
+    foreach ($data['node_types'] as &$nodeType) {
+      $nodeType['summary'] = $this->buildNodeTypeSummary($nodeType);
+    }
+    unset($nodeType);
     foreach ($data['storage'] as &$row) {
       $row['summary'] = $this->buildStorageSummary($row);
     }
@@ -447,8 +463,8 @@ class ResourceDocumentationController extends ControllerBase {
    *   would return content for it. A section counts when it has paragraph rows
    *   or its prose field is non-blank: login also counts the OnDemand URL,
    *   login text and login help links; file transfer counts its text; storage
-   *   counts its text and external storage; queue specs count the jobs info
-   *   text; datasets count their text.
+   *   counts its text and external storage; queue specs count node types and
+   *   the jobs info text; datasets count their text.
    * - `variants`: list of member CIDER variants for traceability.
    */
   public function listResourceGroups() {
@@ -632,7 +648,13 @@ class ResourceDocumentationController extends ControllerBase {
     $storage = $has_rows('field_rp_storage', self::STORAGE_MAP)
       || $has_text('field_rp_storage_text')
       || $has_text('field_rp_external_storage');
+    // A resource can document node types without queues (cloud resources);
+    // that is still compute hardware, so it counts as the queue_specs section.
+    // getQueueRows() also catches a queue whose only content is its node type
+    // entries, which the legacy QUEUE_SPEC_MAP row would miss.
     $queue_specs = $has_rows('field_rp_queue_specs', self::QUEUE_SPEC_MAP)
+      || $this->getQueueRows($node) !== []
+      || $this->getNodeTypeData($node) !== []
       || $has_text('field_rp_jobs_info');
     $datasets = $has_rows('field_rp_datasets', self::DATASET_MAP)
       || $has_text('field_rp_datasets_text');
@@ -759,51 +781,255 @@ class ResourceDocumentationController extends ControllerBase {
    */
   private function getParagraphData($node, string $field_name, array $field_map): array {
     $items = [];
-    /** @var \Drupal\Core\Entity\RevisionableStorageInterface $paragraph_storage */
-    $paragraph_storage = $this->entityTypeManager()->getStorage('paragraph');
-    foreach ($node->get($field_name) as $ref) {
-      $paragraph = $paragraph_storage->loadRevision($ref->target_revision_id);
-      if (!$paragraph) {
-        continue;
-      }
-      $row = [];
-      foreach ($field_map as $paragraph_field => $key) {
-        if ($paragraph->hasField($paragraph_field)) {
-          $field = $paragraph->get($paragraph_field);
-          if ($field->getFieldDefinition()->getType() === 'boolean') {
-            $row[$key] = (bool) $field->value;
-          }
-          elseif ($field->getFieldDefinition()->getType() === 'integer') {
-            // Keep counts/sizes typed so consumers can filter and compute
-            // without re-parsing strings. Sizes stay raw and in GB.
-            $row[$key] = $field->isEmpty() ? NULL : (int) $field->value;
-          }
-          elseif ($field->getFieldDefinition()->getType() === 'link') {
-            if ($field->isEmpty()) {
-              $row[$key] = NULL;
-            }
-            else {
-              try {
-                $row[$key] = $field->first()->getUrl()->toString();
-              }
-              catch (\Exception $e) {
-                // Url::fromUri() throws on a malformed or scheme-less stored
-                // URI; one bad row must not 500 the whole response. Mirrors
-                // getLinkValue()'s fallback to the raw URI.
-                $row[$key] = $field->first()->uri ?: NULL;
-              }
-            }
-          }
-          else {
-            $row[$key] = $field->value;
-          }
-        }
-      }
-      if (array_filter($row, fn($v) => $v !== NULL && $v !== '')) {
+    foreach ($this->loadParagraphs($node, $field_name) as $paragraph) {
+      $row = $this->paragraphRow($paragraph, $field_map);
+      if ($this->rowHasValue($row)) {
         $items[] = $row;
       }
     }
     return $items;
+  }
+
+  /**
+   * Load the referenced paragraph revisions of a field, in order.
+   *
+   * @return array<int, \Drupal\Core\Entity\EntityInterface>
+   *   A list, with references that no longer load left out.
+   */
+  private function loadParagraphs($entity, string $field_name): array {
+    if (!$entity->hasField($field_name)) {
+      return [];
+    }
+    /** @var \Drupal\Core\Entity\RevisionableStorageInterface $paragraph_storage */
+    $paragraph_storage = $this->entityTypeManager()->getStorage('paragraph');
+    $paragraphs = [];
+    foreach ($entity->get($field_name) as $ref) {
+      $paragraph = $paragraph_storage->loadRevision($ref->target_revision_id);
+      if ($paragraph) {
+        $paragraphs[] = $paragraph;
+      }
+    }
+    return $paragraphs;
+  }
+
+  /**
+   * Read a paragraph's fields into a flat row keyed by the given map.
+   */
+  private function paragraphRow($paragraph, array $field_map): array {
+    $row = [];
+    foreach ($field_map as $paragraph_field => $key) {
+      if ($paragraph->hasField($paragraph_field)) {
+        $field = $paragraph->get($paragraph_field);
+        if ($field->getFieldDefinition()->getType() === 'boolean') {
+          $row[$key] = (bool) $field->value;
+        }
+        elseif ($field->getFieldDefinition()->getType() === 'integer') {
+          // Keep counts/sizes typed so consumers can filter and compute
+          // without re-parsing strings. Sizes stay raw and in GB.
+          $row[$key] = $field->isEmpty() ? NULL : (int) $field->value;
+        }
+        elseif ($field->getFieldDefinition()->getType() === 'link') {
+          if ($field->isEmpty()) {
+            $row[$key] = NULL;
+          }
+          else {
+            try {
+              $row[$key] = $field->first()->getUrl()->toString();
+            }
+            catch (\Exception $e) {
+              // Url::fromUri() throws on a malformed or scheme-less stored
+              // URI; one bad row must not 500 the whole response. Mirrors
+              // getLinkValue()'s fallback to the raw URI.
+              $row[$key] = $field->first()->uri ?: NULL;
+            }
+          }
+        }
+        else {
+          $row[$key] = $field->value;
+        }
+      }
+    }
+    return $row;
+  }
+
+  /**
+   * Whether a row has any value other than NULL or an empty string.
+   */
+  private function rowHasValue(array $row): bool {
+    return (bool) array_filter($row, fn($v) => $v !== NULL && $v !== '');
+  }
+
+  /**
+   * Read the resource's node types, each with its GPU list.
+   *
+   * @return list<array<string, mixed>>
+   *   Node types in editor order; empty when the resource has none.
+   */
+  private function getNodeTypeData($node): array {
+    $nodeTypes = [];
+    foreach ($this->loadParagraphs($node, 'field_rp_node_types') as $paragraph) {
+      $row = $this->paragraphRow($paragraph, [
+        'field_rp_node_type_label' => 'label',
+        'field_rp_node_type_description' => 'description',
+        'field_rp_node_count' => 'node_count',
+        'field_rp_cpus' => 'cpu_type',
+        'field_rp_cpu_count' => 'cpu_count',
+        'field_rp_vram' => 'ram',
+      ]);
+      $gpus = [];
+      foreach ($this->loadParagraphs($paragraph, 'field_rp_node_gpus') as $gpuParagraph) {
+        $gpu = $this->paragraphRow($gpuParagraph, [
+          'field_rp_gpus' => 'type',
+          'field_rp_gpu_count' => 'count',
+          'field_rp_gpu_vram' => 'vram',
+        ]);
+        if ($this->rowHasValue($gpu)) {
+          $gpus[] = $gpu;
+        }
+      }
+      $row['gpus'] = $gpus;
+      if (!$this->rowHasValue(array_diff_key($row, ['gpus' => 1])) && !$gpus) {
+        continue;
+      }
+      $nodeTypes[] = [
+        'label' => $this->trimmedOrNull($row['label'] ?? NULL),
+        'description' => $row['description'] ?? NULL,
+        'node_count' => $row['node_count'] ?? NULL,
+        'cpu_type' => $row['cpu_type'] ?? NULL,
+        'cpu_count' => $row['cpu_count'] ?? NULL,
+        'ram' => $row['ram'] ?? NULL,
+        'gpus' => $gpus,
+      ];
+    }
+    return $nodeTypes;
+  }
+
+  /**
+   * Read the queue paragraphs with the node types each one points at.
+   *
+   * Internal shape: the wall time stays in minutes so deriveQueueSpecs() can
+   * hand rows to the same wall-time normalizer the legacy rows use.
+   *
+   * @return list<array{name: mixed, purpose: mixed, max_wall_time_minutes: mixed, nodes: list<array{node_type: ?string, node_count: ?int}>}>
+   *   Queues in editor order.
+   */
+  private function getQueueRows($node): array {
+    $queues = [];
+    foreach ($this->loadParagraphs($node, 'field_rp_queue_specs') as $paragraph) {
+      $row = $this->paragraphRow($paragraph, [
+        'field_rp_queue_name' => 'name',
+        'field_rp_queue_purpose' => 'purpose',
+        'field_rp_max_wall_time' => 'max_wall_time_minutes',
+      ]);
+      $nodes = [];
+      foreach ($this->loadParagraphs($paragraph, 'field_rp_queue_nodes') as $nodeParagraph) {
+        $entry = $this->paragraphRow($nodeParagraph, [
+          'field_rp_queue_node_type' => 'node_type',
+          'field_rp_node_count' => 'node_count',
+        ]);
+        if ($this->rowHasValue($entry)) {
+          $nodes[] = [
+            'node_type' => $this->trimmedOrNull($entry['node_type'] ?? NULL),
+            'node_count' => $entry['node_count'] ?? NULL,
+          ];
+        }
+      }
+      if (!$this->rowHasValue($row) && !$nodes) {
+        continue;
+      }
+      $row['nodes'] = $nodes;
+      $queues[] = $row;
+    }
+    return $queues;
+  }
+
+  /**
+   * Trim a label with NodeTypeReferences::normalize(); blank becomes NULL.
+   */
+  private function trimmedOrNull(mixed $value): ?string {
+    if ($value === NULL) {
+      return NULL;
+    }
+    $value = NodeTypeReferences::normalize((string) $value);
+    return $value === '' ? NULL : $value;
+  }
+
+  /**
+   * Shape queue rows for the `queues` payload key.
+   *
+   * @return list<array<string, mixed>>
+   *   Always a list; a resource with no node types gets queues with empty
+   *   `nodes`.
+   */
+  private function buildQueues(array $queueRows): array {
+    $queues = [];
+    foreach ($queueRows as $row) {
+      $minutes = $this->minutesOrNull($row['max_wall_time_minutes'] ?? NULL);
+      $queues[] = [
+        'name' => $row['name'] ?? NULL,
+        'purpose' => $row['purpose'] ?? NULL,
+        'max_wall_time_hours' => $minutes === NULL ? NULL : $minutes / 60,
+        'max_wall_time_display' => $this->wallTimeDisplay($minutes),
+        'nodes' => $row['nodes'],
+      ];
+    }
+    return $queues;
+  }
+
+  /**
+   * Derive legacy per-row queue_specs from node types and queues.
+   *
+   * One row per queue-and-node-type entry, in the keys the old rows had; the
+   * wall time and summary are added by the caller's shared loops. A queue with
+   * no node types gives one row with null hardware.
+   *
+   * @return list<array<string, mixed>>
+   *   Rows in the legacy shape.
+   */
+  private function deriveQueueSpecs(array $queueRows, array $nodeTypes): array {
+    $byLabel = [];
+    foreach ($nodeTypes as $nodeType) {
+      if ($nodeType['label'] !== NULL && !isset($byLabel[$nodeType['label']])) {
+        $byLabel[$nodeType['label']] = $nodeType;
+      }
+    }
+
+    $rows = [];
+    foreach ($queueRows as $queue) {
+      $entries = $queue['nodes'] ?: [['node_type' => NULL, 'node_count' => NULL]];
+      foreach ($entries as $entry) {
+        $nodeType = $entry['node_type'] !== NULL ? ($byLabel[$entry['node_type']] ?? NULL) : NULL;
+        $gpus = $nodeType['gpus'] ?? [];
+        $types = array_values(array_filter(array_map(fn($g) => $g['type'] ?? NULL, $gpus), fn($t) => $t !== NULL && $t !== ''));
+        $counts = array_filter(array_map(fn($g) => $g['count'] ?? NULL, $gpus), fn($c) => $c !== NULL);
+        $purpose = $queue['purpose'] ?? NULL;
+        if ($purpose === NULL || $purpose === '') {
+          $purpose = $nodeType['description'] ?? NULL;
+        }
+        $rows[] = [
+          'name' => $queue['name'] ?? NULL,
+          'purpose' => $purpose,
+          'node_count' => $entry['node_count'],
+          'cpu_count' => $nodeType['cpu_count'] ?? NULL,
+          'cpu_type' => $nodeType['cpu_type'] ?? NULL,
+          // Several GPU models on one node: join the models, sum the counts
+          // that are known, and drop the vRAM, which can differ per model.
+          'gpu_count' => $counts ? array_sum($counts) : NULL,
+          'gpu_type' => $types ? implode(', ', $types) : NULL,
+          'gpu_vram' => count($gpus) === 1 ? ($gpus[0]['vram'] ?? NULL) : NULL,
+          'ram' => $nodeType['ram'] ?? NULL,
+          'max_wall_time_minutes' => $queue['max_wall_time_minutes'] ?? NULL,
+        ];
+      }
+    }
+    return $rows;
+  }
+
+  /**
+   * Whole minutes from a stored wall time, or NULL when blank.
+   */
+  private function minutesOrNull(mixed $minutes): ?int {
+    return ($minutes === NULL || $minutes === '') ? NULL : (int) $minutes;
   }
 
   /**
@@ -854,22 +1080,62 @@ class ResourceDocumentationController extends ControllerBase {
       $parts[] = $nodes . ($nodes === 1 ? ' node' : ' nodes');
     }
 
-    if (!empty($queue['cpu_count']) && !empty($queue['cpu_type'])) {
-      $parts[] = $queue['cpu_count'] . '-core ' . $queue['cpu_type'];
+    $parts = array_merge($parts, $this->cpuRamSummaryParts($queue));
+
+    return $parts ? implode(', ', $parts) : NULL;
+  }
+
+  /**
+   * Build a one-line hardware summary of a node type.
+   *
+   * Lists every GPU model, e.g. "4× AMD MI100 (32 GB vRAM), 4× AMD MI210,
+   * 64-core AMD EPYC 7763, 256 GB RAM". The node count is left out: it is
+   * how many nodes of this type exist, not part of the hardware.
+   */
+  private function buildNodeTypeSummary(array $nodeType): ?string {
+    $parts = [];
+    foreach ($nodeType['gpus'] as $gpu) {
+      $text = '';
+      if (!empty($gpu['count'])) {
+        $text = $gpu['count'] . '×';
+      }
+      if (!empty($gpu['type'])) {
+        $text = $text === '' ? $gpu['type'] : $text . ' ' . $gpu['type'];
+      }
+      if (!empty($gpu['vram'])) {
+        $text .= ' (' . $gpu['vram'] . ' GB vRAM)';
+      }
+      if (trim($text) !== '') {
+        $parts[] = trim($text);
+      }
     }
-    elseif (!empty($queue['cpu_type'])) {
-      $parts[] = $queue['cpu_type'];
+    $parts = array_merge($parts, $this->cpuRamSummaryParts($nodeType));
+    return $parts ? implode(', ', $parts) : NULL;
+  }
+
+  /**
+   * The CPU and RAM phrases shared by queue and node type summaries.
+   *
+   * @return string[]
+   *   Zero, one or two phrases.
+   */
+  private function cpuRamSummaryParts(array $hardware): array {
+    $parts = [];
+    if (!empty($hardware['cpu_count']) && !empty($hardware['cpu_type'])) {
+      $parts[] = $hardware['cpu_count'] . '-core ' . $hardware['cpu_type'];
     }
-    elseif (!empty($queue['cpu_count'])) {
-      $parts[] = $queue['cpu_count'] . '-core';
+    elseif (!empty($hardware['cpu_type'])) {
+      $parts[] = $hardware['cpu_type'];
+    }
+    elseif (!empty($hardware['cpu_count'])) {
+      $parts[] = $hardware['cpu_count'] . '-core';
     }
 
     // field_rp_vram holds node RAM (GB), despite its legacy field name.
-    if (isset($queue['ram']) && $queue['ram'] !== NULL && $queue['ram'] !== '') {
-      $parts[] = $this->formatGbSize((int) $queue['ram']) . ' RAM';
+    if (isset($hardware['ram']) && $hardware['ram'] !== NULL && $hardware['ram'] !== '') {
+      $parts[] = $this->formatGbSize((int) $hardware['ram']) . ' RAM';
     }
-
-    return $parts ? implode(', ', $parts) : NULL;
+    return $parts;
   }
 
   /**

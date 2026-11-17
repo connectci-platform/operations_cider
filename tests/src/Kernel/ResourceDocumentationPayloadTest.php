@@ -8,6 +8,8 @@ use Drupal\KernelTests\KernelTestBase;
 use Drupal\node\Entity\Node;
 use Drupal\node\Entity\NodeType;
 use Drupal\operations_cider\Controller\ResourceDocumentationController;
+use Drupal\paragraphs\Entity\Paragraph;
+use Drupal\Tests\operations_cider\Traits\NodeTypeFieldsTrait;
 use Drupal\user\Entity\Role;
 use Drupal\user\Entity\User;
 
@@ -22,6 +24,8 @@ use Drupal\user\Entity\User;
  * @group operations_cider
  */
 class ResourceDocumentationPayloadTest extends KernelTestBase {
+
+  use NodeTypeFieldsTrait;
 
   /**
    * {@inheritdoc}
@@ -116,12 +120,11 @@ class ResourceDocumentationPayloadTest extends KernelTestBase {
     }
 
     // getParagraphData() loads from the paragraph storage, so the module is
-    // enabled and the reference fields exist; none holds a paragraph.
+    // enabled and the reference fields exist.
     $paragraphFields = [
       'field_rp_ssh_login_nodes',
       'field_rp_file_transfer',
       'field_rp_storage',
-      'field_rp_queue_specs',
       'field_rp_datasets',
     ];
     foreach ($paragraphFields as $name) {
@@ -130,6 +133,12 @@ class ResourceDocumentationPayloadTest extends KernelTestBase {
         'settings' => ['target_type' => 'paragraph'],
       ]);
     }
+
+    // Queue and node type paragraph fields (field_rp_queue_specs included),
+    // then the rest of what the detail and group-list endpoints read
+    // unguarded, so the tests below can fetch a whole payload.
+    $this->setUpNodeTypeFields();
+    $this->addPayloadFields();
 
     // The endpoint is called directly, but accessCheck(TRUE) queries still run
     // as the current user, so give it the permission.
@@ -156,6 +165,76 @@ class ResourceDocumentationPayloadTest extends KernelTestBase {
         'entity_type' => 'node',
         'bundle' => $bundle,
       ])->save();
+    }
+  }
+
+  /**
+   * Add the fields the detail and group-list endpoints read unguarded.
+   *
+   * Skips any that setUp() already created.
+   */
+  private function addPayloadFields(): void {
+    $resource = ['access_active_resources_from_cid'];
+    $both = ['access_active_resources_from_cid', 'resource_group'];
+    $simple = [
+      'string' => [
+        'field_access_global_resource_id', 'field_access_org_name',
+        'field_cider_latest_status', 'field_cider_resource_type',
+        'field_cider_short_name',
+      ],
+      'text_long' => ['field_rp_description'],
+      'boolean' => ['field_rp_mfa_required', 'field_rp_account_required'],
+      'string_long' => [
+        'field_rp_login_text', 'field_rp_file_transfer_text',
+        'field_rp_storage_text', 'field_rp_datasets_text', 'field_rp_jobs_info',
+        'field_rp_external_storage', 'field_rp_top_software',
+        'field_rp_ood_software',
+      ],
+      'link' => [
+        'field_access_org_url', 'field_rp_ondemand_url', 'field_rp_office_hours',
+        'field_rp_software_list_url', 'field_rp_account_setup_url',
+      ],
+    ];
+    foreach ($simple as $type => $names) {
+      foreach ($names as $name) {
+        $this->ensureNodeField($name, $type, $resource);
+      }
+    }
+    $this->ensureNodeField('field_rp_listing', 'boolean', $both);
+    $this->ensureNodeField('field_domain_access', 'string', $both, ['cardinality' => -1]);
+    foreach (['field_rp_login_help_links', 'field_rp_support_links'] as $name) {
+      $this->ensureNodeField($name, 'link', $resource, ['cardinality' => -1]);
+    }
+    foreach ([
+      'field_rp_ssh_login_nodes', 'field_rp_file_transfer', 'field_rp_storage',
+      'field_rp_datasets',
+    ] as $name) {
+      $this->ensureNodeField($name, 'entity_reference_revisions', $resource, [
+        'cardinality' => -1,
+        'settings' => ['target_type' => 'paragraph'],
+      ]);
+    }
+  }
+
+  /**
+   * Create a node field storage and its instances when missing.
+   */
+  private function ensureNodeField(string $name, string $type, array $bundles, array $storage = []): void {
+    if (!FieldStorageConfig::loadByName('node', $name)) {
+      FieldStorageConfig::create([
+        'field_name' => $name,
+        'entity_type' => 'node',
+        'type' => $type,
+      ] + $storage)->save();
+    }
+    foreach ($bundles as $bundle) {
+      if (!FieldConfig::loadByName('node', $bundle, $name)) {
+        FieldConfig::create([
+          'field_name' => $name,
+          'entity_type' => 'node',
+          'bundle' => $bundle,
+        ])->save();
+      }
     }
   }
 
@@ -338,6 +417,367 @@ class ResourceDocumentationPayloadTest extends KernelTestBase {
     $method = new \ReflectionMethod($controller, 'buildQueueSummary');
     $method->setAccessible(TRUE);
     return $method->invoke($controller, $queue);
+  }
+
+  /**
+   * Node types and queues are emitted in their own shapes and key order.
+   */
+  public function testNodeTypesAndQueuesInPayload(): void {
+    $gpuNode = $this->nodeType('GPU node', [
+      'field_rp_node_type_description' => 'Eight-GPU nodes',
+      'field_rp_node_count' => 12,
+      'field_rp_cpus' => 'AMD EPYC 7763',
+      'field_rp_cpu_count' => 64,
+      'field_rp_vram' => 512,
+    ], [
+      ['AMD MI100', 4, 32],
+      ['AMD MI210', 4, 64],
+    ]);
+    $cpuNode = $this->nodeType('CPU node', [
+      'field_rp_cpus' => 'AMD EPYC 7742',
+      'field_rp_cpu_count' => 128,
+      'field_rp_vram' => 2000,
+    ]);
+    // Stale hardware on the queue row must be ignored once node types exist.
+    $gpuQueue = $this->queue('gpu', 'GPU jobs', 2880, [['GPU node', 10]], [
+      'field_rp_node_count' => 999,
+      'field_rp_gpus' => 'Stale GPU',
+    ]);
+    // Numeric-looking names must keep their order and stay a list.
+    $second = $this->queue('2', NULL, 30, [[' CPU node ', 700], ['GPU node', 2]]);
+    $first = $this->queue('1', NULL, NULL, [['CPU node', NULL]]);
+    $node = $this->resource([$gpuNode, $cpuNode], [$gpuQueue, $second, $first]);
+
+    $payload = $this->payload($node);
+
+    $keys = array_keys($payload);
+    $at = array_search('queue_specs', $keys, TRUE);
+    $this->assertSame(['node_types', 'queues'], array_slice($keys, $at + 1, 2));
+
+    $this->assertTrue(array_is_list($payload['node_types']));
+    $this->assertSame(['GPU node', 'CPU node'], array_column($payload['node_types'], 'label'));
+    $this->assertSame([
+      'label' => 'GPU node',
+      'description' => 'Eight-GPU nodes',
+      'node_count' => 12,
+      'cpu_type' => 'AMD EPYC 7763',
+      'cpu_count' => 64,
+      'ram' => 512,
+      'gpus' => [
+        ['type' => 'AMD MI100', 'count' => 4, 'vram' => 32],
+        ['type' => 'AMD MI210', 'count' => 4, 'vram' => 64],
+      ],
+      'summary' => '4× AMD MI100 (32 GB vRAM), 4× AMD MI210 (64 GB vRAM), 64-core AMD EPYC 7763, 512 GB RAM',
+    ], $payload['node_types'][0]);
+    $this->assertSame([], $payload['node_types'][1]['gpus']);
+    $this->assertSame('128-core AMD EPYC 7742, 2 TB RAM', $payload['node_types'][1]['summary']);
+
+    $this->assertTrue(array_is_list($payload['queues']));
+    $this->assertSame(['gpu', '2', '1'], array_column($payload['queues'], 'name'));
+    $this->assertSame([
+      'name' => 'gpu',
+      'purpose' => 'GPU jobs',
+      'max_wall_time_hours' => 48,
+      'max_wall_time_display' => '48 hours',
+      'nodes' => [['node_type' => 'GPU node', 'node_count' => 10]],
+    ], $payload['queues'][0]);
+    $this->assertSame(0.5, $payload['queues'][1]['max_wall_time_hours']);
+    $this->assertSame('30 minutes', $payload['queues'][1]['max_wall_time_display']);
+    // Labels are trimmed with NodeTypeReferences::normalize().
+    $this->assertSame('CPU node', $payload['queues'][1]['nodes'][0]['node_type']);
+    $this->assertNull($payload['queues'][2]['max_wall_time_hours']);
+
+    // One derived queue_specs row per nodes entry, from node types only.
+    $this->assertTrue(array_is_list($payload['queue_specs']));
+    $this->assertSame(
+      ['gpu', '2', '2', '1'],
+      array_column($payload['queue_specs'], 'name')
+    );
+    $this->assertSame(10, $payload['queue_specs'][0]['node_count']);
+    $this->assertSame('AMD MI100, AMD MI210', $payload['queue_specs'][0]['gpu_type']);
+    $this->assertSame(64, $payload['queue_specs'][0]['cpu_count']);
+    $this->assertSame(2880 / 60, $payload['queue_specs'][0]['max_wall_time_hours']);
+    $this->assertSame('Eight-GPU nodes', $payload['queue_specs'][2]['purpose'], 'Purpose falls back to the node type description.');
+    $this->assertSame('GPU jobs', $payload['queue_specs'][0]['purpose']);
+    $this->assertSame(
+      ['name', 'purpose', 'node_count', 'cpu_count', 'cpu_type', 'gpu_count', 'gpu_type', 'gpu_vram', 'ram', 'max_wall_time_hours', 'max_wall_time_display', 'summary'],
+      array_keys($payload['queue_specs'][0])
+    );
+    $this->assertSame(
+      '8 AMD MI100, AMD MI210, 10 nodes, 64-core AMD EPYC 7763, 512 GB RAM',
+      $payload['queue_specs'][0]['summary']
+    );
+  }
+
+  /**
+   * A mixed-GPU node type gives one joined legacy row with summed counts.
+   */
+  public function testLegacyQueueSpecsFromMixedGpuNode(): void {
+    $mixed = $this->nodeType('Mixed', [], [['AMD MI100', 4, 32], ['AMD MI210', 4, 64]]);
+    $blank = $this->nodeType('Blank counts', [], [['AMD MI100', NULL, NULL], ['AMD MI210', NULL, NULL]]);
+    $partial = $this->nodeType('Partial', [], [['AMD MI100', 2, NULL], ['AMD MI210', NULL, NULL]]);
+    $single = $this->nodeType('Single', [], [['NVIDIA H100', 8, 80]]);
+    $queue = $this->queue('q', 'Purpose', 60, [
+      ['Mixed', 1], ['Blank counts', 2], ['Partial', 3], ['Single', 4],
+    ]);
+    $payload = $this->payload($this->resource([$mixed, $blank, $partial, $single], [$queue]));
+
+    [$a, $b, $c, $d] = $payload['queue_specs'];
+    $this->assertSame('AMD MI100, AMD MI210', $a['gpu_type']);
+    $this->assertSame(8, $a['gpu_count']);
+    $this->assertNull($a['gpu_vram']);
+    $this->assertSame('AMD MI100, AMD MI210', $b['gpu_type']);
+    $this->assertNull($b['gpu_count'], 'Both counts blank gives a null total, not zero.');
+    $this->assertNull($b['gpu_vram']);
+    $this->assertSame(2, $c['gpu_count'], 'Only the known counts are summed.');
+    $this->assertSame('NVIDIA H100', $d['gpu_type']);
+    $this->assertSame(8, $d['gpu_count']);
+    $this->assertSame(80, $d['gpu_vram']);
+  }
+
+  /**
+   * Migrating Bridges-2 GPU leaves its legacy rows the same apart from purpose.
+   *
+   * The rows are the live data for nid 390: ten rows, three queues, six
+   * distinct hardware tuples. The migration moves a row's purpose onto the node
+   * type when the queue's rows disagree, so purpose is the one field allowed to
+   * differ.
+   */
+  public function testLegacyQueueSpecsMatchPreMigrationRows(): void {
+    $rows = [
+      ['name' => 'GPU-shared', 'purpose' => 'V100-32 Node. Jobs using 1 to 4 of a node\'s V100-32 GPUs, shared with other jobs; charged per GPU.', 'node_count' => 24, 'cpu_type' => '2x Intel Xeon Gold 6248 "Cascade Lake"', 'cpu_count' => 40, 'gpu_type' => 'NVIDIA Tesla V100-32GB SXM2', 'gpu_count' => 8, 'gpu_vram' => 32, 'ram' => 512, 'max_wall_minutes' => 2880],
+      ['name' => 'GPU-shared', 'purpose' => 'H100-80 Node. Jobs using 1 to 4 of a node\'s H100-80 GPUs, shared with other jobs; charged per GPU.', 'node_count' => 10, 'cpu_type' => '2x Intel Xeon "Sapphire Rapids" 8470', 'cpu_count' => 104, 'gpu_type' => 'NVIDIA H100-80GB SXM5', 'gpu_count' => 8, 'gpu_vram' => 80, 'ram' => 2000, 'max_wall_minutes' => 2880],
+      ['name' => 'GPU-shared', 'purpose' => 'V100-16 Node. Jobs using 1 to 4 of a node\'s V100-16 GPUs, shared with other jobs; charged per GPU.', 'node_count' => 9, 'cpu_type' => '2x Intel Xeon Gold 6148', 'cpu_count' => 40, 'gpu_type' => 'NVIDIA V100-16GB', 'gpu_count' => 8, 'gpu_vram' => 16, 'ram' => 192, 'max_wall_minutes' => 2880],
+      ['name' => 'GPU-shared', 'purpose' => 'L40S-48 Node. Jobs using 1 to 4 of a node\'s L40S-48 GPUs, shared with other jobs; charged per GPU.', 'node_count' => 3, 'cpu_type' => '2x Intel Xeon 6740E', 'cpu_count' => 192, 'gpu_type' => 'NVIDIA L40S-48GB', 'gpu_count' => 8, 'gpu_vram' => 48, 'ram' => 1000, 'max_wall_minutes' => 2880],
+      ['name' => 'GPU', 'purpose' => 'V100-32 Node. Jobs using one or more whole V100-32 nodes, all eight GPUs each; charged for the full node.', 'node_count' => 23, 'cpu_type' => '2x Intel Xeon Gold 6248 "Cascade Lake"', 'cpu_count' => 40, 'gpu_type' => 'NVIDIA Tesla V100-32GB SXM2', 'gpu_count' => 8, 'gpu_vram' => 32, 'ram' => 512, 'max_wall_minutes' => 2880],
+      ['name' => 'GPU', 'purpose' => 'H100-80 Node. Jobs using one or more whole H100-80 nodes, all eight GPUs each; charged for the full node.', 'node_count' => 10, 'cpu_type' => '2x Intel Xeon "Sapphire Rapids" 8470', 'cpu_count' => 104, 'gpu_type' => 'NVIDIA H100-80GB SXM5', 'gpu_count' => 8, 'gpu_vram' => 80, 'ram' => 2000, 'max_wall_minutes' => 2880],
+      ['name' => 'GPU', 'purpose' => 'V100-16 Node. Jobs using one or more whole V100-16 nodes, all eight GPUs each; charged for the full node.', 'node_count' => 9, 'cpu_type' => '2x Intel Xeon Gold 6148', 'cpu_count' => 40, 'gpu_type' => 'NVIDIA V100-16GB', 'gpu_count' => 8, 'gpu_vram' => 16, 'ram' => 192, 'max_wall_minutes' => 2880],
+      ['name' => 'GPU', 'purpose' => 'L40S-48 Node. Jobs using one or more whole L40S-48 nodes, all eight GPUs each; charged for the full node.', 'node_count' => 3, 'cpu_type' => '2x Intel Xeon 6740E', 'cpu_count' => 192, 'gpu_type' => 'NVIDIA L40S-48GB', 'gpu_count' => 8, 'gpu_vram' => 48, 'ram' => 1000, 'max_wall_minutes' => 2880],
+      ['name' => 'GPU', 'purpose' => 'DGX-2 special node. Jobs using the whole DGX-2 node and all 16 V100-32 GPUs; charged for the full node.', 'node_count' => 1, 'cpu_type' => '2x Intel Xeon Platinum 8168', 'cpu_count' => 48, 'gpu_type' => 'NVIDIA Volta V100-32GB', 'gpu_count' => 16, 'gpu_vram' => 32, 'ram' => 1500, 'max_wall_minutes' => 2880],
+      ['name' => 'GPU-small', 'purpose' => 'Used for interactive and small or quick GPU jobs on a single V100-32 node.', 'node_count' => 1, 'cpu_type' => '2x Intel Xeon Gold' . "\u{a0}" . '6248', 'cpu_count' => 40, 'gpu_type' => 'NVIDIA Tesla V100-32GB SXM2', 'gpu_count' => 8, 'gpu_vram' => 32, 'ram' => 512, 'max_wall_minutes' => 2880],
+    ];
+    $paragraphs = [];
+    foreach ($rows as $row) {
+      $paragraphs[] = $this->legacyQueue($row);
+    }
+    $node = $this->resource([], $paragraphs);
+
+    $before = $this->payload($node);
+    $this->assertSame([], $before['node_types']);
+    $this->assertCount(10, $before['queue_specs']);
+    $this->assertCount(10, $before['queues'], 'Before migration there is one queue entry per legacy row.');
+    $this->assertSame([], $before['queues'][0]['nodes'], 'Queues are present without node types, with no node entries.');
+
+    \Drupal::moduleHandler()->loadInclude('operations_cider', 'php', 'operations_cider.post_update');
+    $sandbox = [];
+    $passes = 0;
+    do {
+      operations_cider_post_update_d3090_01_node_types($sandbox);
+      $passes++;
+    } while (($sandbox['#finished'] ?? 1) < 1 && $passes < 20);
+    $this->assertSame([], $sandbox['failed']);
+
+    $after = $this->payload($node);
+    $this->assertCount(6, $after['node_types']);
+    $this->assertSame(['GPU-shared', 'GPU', 'GPU-small'], array_column($after['queues'], 'name'));
+
+    $strip = static function (array $rows): array {
+      return array_map(static function (array $row): array {
+        unset($row['purpose']);
+        return $row;
+      }, $rows);
+    };
+    $this->assertSame($strip($before['queue_specs']), $strip($after['queue_specs']));
+  }
+
+  /**
+   * A resource with node types but no queues still reports its hardware.
+   */
+  public function testNodeTypesWithoutQueues(): void {
+    $vm = $this->nodeType('Large VM', ['field_rp_cpu_count' => 32, 'field_rp_vram' => 128]);
+    $node = $this->resource([$vm], []);
+
+    $payload = $this->payload($node);
+
+    $this->assertCount(1, $payload['node_types']);
+    $this->assertSame('32-core, 128 GB RAM', $payload['node_types'][0]['summary']);
+    $this->assertSame([], $payload['queues']);
+    $this->assertSame([], $payload['queue_specs']);
+
+    // The group list must still treat this as having the compute section.
+    Node::create([
+      'type' => 'resource_group',
+      'title' => 'Cloud group',
+      'status' => 1,
+      'field_cider_resources' => [['target_id' => $node->id()]],
+    ])->save();
+    $response = ResourceDocumentationController::create($this->container)->listResourceGroups();
+    $groups = json_decode($response->getContent(), TRUE)['groups'];
+    $this->assertContains('queue_specs', $groups[0]['populated_sections']);
+  }
+
+  /**
+   * A queue that lists no node types gives one legacy row with null hardware.
+   */
+  public function testQueueWithoutNodeTypesGivesNullHardwareRow(): void {
+    $gpu = $this->nodeType('GPU node', ['field_rp_cpu_count' => 8], [['NVIDIA A100', 4, 80]]);
+    $linked = $this->queue('linked', 'Linked', 60, [['GPU node', 3]]);
+    $orphan = $this->queue('orphan', 'No hardware', 120, []);
+    $payload = $this->payload($this->resource([$gpu], [$linked, $orphan]));
+
+    $this->assertCount(2, $payload['queue_specs']);
+    $row = $payload['queue_specs'][1];
+    $this->assertSame('orphan', $row['name']);
+    $this->assertSame('No hardware', $row['purpose']);
+    foreach (['node_count', 'cpu_count', 'cpu_type', 'gpu_count', 'gpu_type', 'gpu_vram', 'ram', 'summary'] as $key) {
+      $this->assertArrayHasKey($key, $row);
+      $this->assertNull($row[$key], "$key should be null.");
+    }
+    $this->assertSame(2, $row['max_wall_time_hours']);
+    $this->assertSame([], $payload['queues'][1]['nodes']);
+  }
+
+  /**
+   * Without node types, queue_specs still comes from the old hardware fields.
+   */
+  public function testResourceWithoutNodeTypesKeepsLegacyQueueSpecs(): void {
+    $legacy = $this->legacyQueue([
+      'name' => 'batch',
+      'purpose' => 'Batch',
+      'node_count' => 5,
+      'cpu_type' => 'Intel Xeon',
+      'cpu_count' => 48,
+      'gpu_type' => NULL,
+      'gpu_count' => NULL,
+      'gpu_vram' => NULL,
+      'ram' => 256,
+      'max_wall_minutes' => 90,
+    ]);
+    $payload = $this->payload($this->resource([], [$legacy]));
+
+    $this->assertSame([], $payload['node_types']);
+    $this->assertSame('batch', $payload['queue_specs'][0]['name']);
+    $this->assertSame(5, $payload['queue_specs'][0]['node_count']);
+    $this->assertSame('Intel Xeon', $payload['queue_specs'][0]['cpu_type']);
+    $this->assertSame(1.5, $payload['queue_specs'][0]['max_wall_time_hours']);
+    $this->assertSame('5 nodes, 48-core Intel Xeon, 256 GB RAM', $payload['queue_specs'][0]['summary']);
+    $this->assertSame('batch', $payload['queues'][0]['name']);
+    $this->assertSame([], $payload['queues'][0]['nodes']);
+  }
+
+  /**
+   * Create a saved node type paragraph with nested GPU paragraphs.
+   *
+   * @param string $label
+   *   The node type label.
+   * @param array<string, mixed> $values
+   *   Extra paragraph field values.
+   * @param array<int, array{0: string, 1: ?int, 2: ?int}> $gpus
+   *   GPU entries: model, count per node, vRAM per GPU.
+   */
+  private function nodeType(string $label, array $values = [], array $gpus = []): Paragraph {
+    $gpuParagraphs = [];
+    foreach ($gpus as [$type, $count, $vram]) {
+      $gpu = Paragraph::create([
+        'type' => 'rp_node_gpu',
+        'field_rp_gpus' => $type,
+        'field_rp_gpu_count' => $count,
+        'field_rp_gpu_vram' => $vram,
+      ]);
+      $gpu->save();
+      $gpuParagraphs[] = $gpu;
+    }
+    $paragraph = Paragraph::create([
+      'type' => 'rp_node_type',
+      'field_rp_node_type_label' => $label,
+      'field_rp_node_gpus' => $gpuParagraphs,
+    ] + $values);
+    $paragraph->save();
+    return $paragraph;
+  }
+
+  /**
+   * Create a saved queue paragraph pointing at node type labels.
+   *
+   * @param string $name
+   *   The queue name.
+   * @param string|null $purpose
+   *   The queue purpose.
+   * @param int|null $minutes
+   *   Maximum wall time in minutes.
+   * @param array<int, array{0: string, 1: ?int}> $nodes
+   *   Node type label and node count per entry.
+   * @param array<string, mixed> $extra
+   *   Extra paragraph field values.
+   */
+  private function queue(string $name, ?string $purpose, ?int $minutes, array $nodes, array $extra = []): Paragraph {
+    $refs = [];
+    foreach ($nodes as [$label, $count]) {
+      $entry = Paragraph::create([
+        'type' => 'rp_queue_node',
+        'field_rp_queue_node_type' => $label,
+        'field_rp_node_count' => $count,
+      ]);
+      $entry->save();
+      $refs[] = $entry;
+    }
+    $paragraph = Paragraph::create([
+      'type' => 'rp_queue_spec',
+      'field_rp_queue_name' => $name,
+      'field_rp_queue_purpose' => $purpose,
+      'field_rp_max_wall_time' => $minutes,
+      'field_rp_queue_nodes' => $refs,
+    ] + $extra);
+    $paragraph->save();
+    return $paragraph;
+  }
+
+  /**
+   * Create a legacy queue paragraph that still holds its own hardware.
+   *
+   * @param array<string, mixed> $row
+   *   A row in the migrator's input shape.
+   */
+  private function legacyQueue(array $row): Paragraph {
+    $paragraph = Paragraph::create([
+      'type' => 'rp_queue_spec',
+      'field_rp_queue_name' => $row['name'],
+      'field_rp_queue_purpose' => $row['purpose'],
+      'field_rp_node_count' => $row['node_count'],
+      'field_rp_cpus' => $row['cpu_type'],
+      'field_rp_cpu_count' => $row['cpu_count'],
+      'field_rp_gpus' => $row['gpu_type'],
+      'field_rp_gpu_count' => $row['gpu_count'],
+      'field_rp_gpu_vram' => $row['gpu_vram'],
+      'field_rp_vram' => $row['ram'],
+      'field_rp_max_wall_time' => $row['max_wall_minutes'],
+    ]);
+    $paragraph->save();
+    return $paragraph;
+  }
+
+  /**
+   * Create a published resource with the given node type and queue paragraphs.
+   */
+  private function resource(array $nodeTypes, array $queues): Node {
+    $node = Node::create([
+      'type' => 'access_active_resources_from_cid',
+      'title' => 'Compute Resource',
+      'status' => 1,
+      'field_rp_node_types' => $nodeTypes,
+      'field_rp_queue_specs' => $queues,
+    ]);
+    $node->save();
+    return $node;
+  }
+
+  /**
+   * The decoded detail payload for a resource.
+   */
+  private function payload(Node $node): array {
+    $response = ResourceDocumentationController::create($this->container)->getResourceByNid($node->id());
+    $this->assertSame(200, $response->getStatusCode());
+    return json_decode($response->getContent(), TRUE);
   }
 
   /**

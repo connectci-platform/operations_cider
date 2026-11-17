@@ -7,6 +7,9 @@
 
 use Drupal\Core\Entity\EntityInterface;
 use Drupal\Core\Form\FormStateInterface;
+use Drupal\Core\Field\WidgetBase;
+use Drupal\operations_cider\NodeTypeReferences;
+use Drupal\paragraphs\ParagraphInterface;
 
 /**
  * Implements hook_node_insert().
@@ -25,12 +28,146 @@ function operations_cider_node_insert(EntityInterface $entity) {
 }
 
 /**
+ * Implements hook_form_FORM_ID_alter() for node_access_active_resources_from_cid_form.
+ *
+ * Validates queue references to node types on the add form.
+ */
+function operations_cider_form_node_access_active_resources_from_cid_form_alter(&$form, FormStateInterface $form_state, $form_id) {
+  $form['#validate'][] = 'operations_cider_validate_node_type_references';
+}
+
+/**
+ * Form validate handler: queues must reference existing node type labels.
+ *
+ * Reads the raw submitted paragraph subform values so that renaming a node
+ * type and fixing the queue references succeed in one submit.
+ */
+function operations_cider_validate_node_type_references(array &$form, FormStateInterface $form_state): void {
+  // Paragraphs add/remove/edit-mode buttons set #limit_validation_errors, so
+  // only a real submit (Save, Preview) is validated here.
+  $trigger = $form_state->getTriggeringElement();
+  if ($trigger && isset($trigger['#limit_validation_errors'])) {
+    return;
+  }
+  if (!isset($form['field_rp_node_types']) || !isset($form['field_rp_queue_specs'])) {
+    return;
+  }
+
+  $labels = [];
+  foreach (operations_cider_paragraph_items($form_state, [], 'field_rp_node_types') as $item) {
+    $labels[] = operations_cider_paragraph_item_value($item, 'field_rp_node_type_label');
+  }
+
+  $queues = [];
+  foreach (operations_cider_paragraph_items($form_state, [], 'field_rp_queue_specs') as $delta => $item) {
+    $node_types = [];
+    if (isset($item['subform'])) {
+      // Expanded queue: its node rows are a nested widget of their own.
+      $nested_parents = ['field_rp_queue_specs', $delta, 'subform'];
+      foreach (operations_cider_paragraph_items($form_state, $nested_parents, 'field_rp_queue_nodes', $item['subform']['field_rp_queue_nodes'] ?? NULL) as $node_item) {
+        $node_types[] = operations_cider_paragraph_item_value($node_item, 'field_rp_queue_node_type');
+      }
+    }
+    elseif (isset($item['entity']) && $item['entity']->hasField('field_rp_queue_nodes')) {
+      // Collapsed queue: read the node rows from the paragraph entity.
+      foreach ($item['entity']->get('field_rp_queue_nodes') as $field_item) {
+        if ($field_item->entity instanceof ParagraphInterface) {
+          $node_types[] = operations_cider_paragraph_item_value(['entity' => $field_item->entity], 'field_rp_queue_node_type');
+        }
+      }
+    }
+    $queues[] = [
+      'name' => operations_cider_paragraph_item_value($item, 'field_rp_queue_name'),
+      'node_types' => $node_types,
+    ];
+  }
+
+  foreach (NodeTypeReferences::errors($labels, $queues) as $message) {
+    $form_state->setErrorByName('field_rp_queue_specs', t('@message', ['@message' => $message]));
+  }
+}
+
+/**
+ * Lists the live items of a paragraphs widget, expanded or collapsed.
+ *
+ * An expanded item has its submitted subform values. A collapsed item has no
+ * subform in the submitted values, so it falls back to the paragraph entity the
+ * widget keeps in its state; skipping it would drop a node type's label and
+ * block the save with a false "missing node type" error. Removed items are
+ * skipped.
+ *
+ * @param \Drupal\Core\Form\FormStateInterface $form_state
+ *   The form state.
+ * @param array<int, int|string> $parents
+ *   The widget's #parents above the field ([] for a top-level field).
+ * @param string $field_name
+ *   The paragraphs field name.
+ * @param mixed $values
+ *   The submitted widget value; read from the form state when NULL.
+ *
+ * @return array<int, array{subform?: array<string, mixed>, entity?: \Drupal\paragraphs\ParagraphInterface}>
+ *   Items keyed by widget delta.
+ */
+function operations_cider_paragraph_items(FormStateInterface $form_state, array $parents, string $field_name, $values = NULL): array {
+  if ($values === NULL) {
+    $values = $form_state->getValue(array_merge($parents, [$field_name]));
+  }
+  $values = is_array($values) ? $values : [];
+  $state = WidgetBase::getWidgetState($parents, $field_name, $form_state);
+  $items = [];
+  if (!empty($state['paragraphs']) && is_array($state['paragraphs'])) {
+    foreach ($state['paragraphs'] as $delta => $paragraph_state) {
+      if (in_array($paragraph_state['mode'] ?? '', ['remove', 'removed'], TRUE)) {
+        continue;
+      }
+      if (isset($values[$delta]['subform']) && is_array($values[$delta]['subform'])) {
+        $items[$delta] = ['subform' => $values[$delta]['subform']];
+      }
+      elseif (($paragraph_state['entity'] ?? NULL) instanceof ParagraphInterface) {
+        $items[$delta] = ['entity' => $paragraph_state['entity']];
+      }
+    }
+    return $items;
+  }
+  // No widget state (unexpected): fall back to the submitted subforms only.
+  foreach ($values as $delta => $item) {
+    if (is_numeric($delta) && is_array($item) && isset($item['subform']) && is_array($item['subform'])) {
+      $items[$delta] = ['subform' => $item['subform']];
+    }
+  }
+  return $items;
+}
+
+/**
+ * Reads a single-value string field from a paragraphs widget item.
+ *
+ * @param array{subform?: array<string, mixed>, entity?: \Drupal\paragraphs\ParagraphInterface} $item
+ *   An item from operations_cider_paragraph_items().
+ * @param string $field_name
+ *   The field to read.
+ *
+ * @return string
+ *   The value, or '' when absent.
+ */
+function operations_cider_paragraph_item_value(array $item, string $field_name): string {
+  if (isset($item['subform'])) {
+    return (string) ($item['subform'][$field_name][0]['value'] ?? '');
+  }
+  if (isset($item['entity']) && $item['entity']->hasField($field_name)) {
+    return (string) ($item['entity']->get($field_name)->value ?? '');
+  }
+  return '';
+}
+
+/**
  * Implements hook_form_FORM_ID_alter() for node_access_active_resources_from_cid_edit_form.
  *
  * Makes CiDeR-synced fields readonly so editors can see the data but know to
  * request changes in CiDeR rather than editing here.
  */
 function operations_cider_form_node_access_active_resources_from_cid_edit_form_alter(&$form, FormStateInterface $form_state, $form_id) {
+  $form['#validate'][] = 'operations_cider_validate_node_type_references';
+
   $cider_fields = [
     'title',
     'body',
