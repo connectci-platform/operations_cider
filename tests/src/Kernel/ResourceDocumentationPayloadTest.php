@@ -8,6 +8,8 @@ use Drupal\KernelTests\KernelTestBase;
 use Drupal\node\Entity\Node;
 use Drupal\node\Entity\NodeType;
 use Drupal\operations_cider\Controller\ResourceDocumentationController;
+use Drupal\user\Entity\Role;
+use Drupal\user\Entity\User;
 
 /**
  * Covers the documentation links and queue metrics on the resource detail API.
@@ -21,8 +23,11 @@ use Drupal\operations_cider\Controller\ResourceDocumentationController;
  */
 class ResourceDocumentationPayloadTest extends KernelTestBase {
 
+  /**
+   * {@inheritdoc}
+   */
   protected static $modules = [
-    'system', 'user', 'node', 'field', 'text', 'link', 'key', 'file',
+    'system', 'user', 'node', 'field', 'text', 'link', 'key', 'domain', 'file',
     'entity_reference_revisions', 'paragraphs', 'operations_cider',
   ];
 
@@ -41,71 +46,75 @@ class ResourceDocumentationPayloadTest extends KernelTestBase {
   private const OWN_FIELD = 'field_rp_software_link';
   private const OWN_KEY = 'software';
 
+  /**
+   * {@inheritdoc}
+   */
   protected function setUp(): void {
     parent::setUp();
     $this->installEntitySchema('user');
     $this->installEntitySchema('node');
+    $this->installEntitySchema('paragraph');
+    $this->installEntitySchema('file');
     $this->installSchema('node', ['node_access']);
+    $this->installConfig(['system']);
 
-    NodeType::create(['type' => 'access_active_resources_from_cid', 'name' => 'Resource'])->save();
+    \Drupal::entityTypeManager()->getStorage('domain')->create([
+      'id' => 'amp_cyberinfrastructure_org',
+      'hostname' => 'amp_cyberinfrastructure_org.example.com',
+      'name' => 'amp_cyberinfrastructure_org',
+      'weight' => 0,
+    ])->save();
+
+    $resource = 'access_active_resources_from_cid';
+    NodeType::create(['type' => $resource, 'name' => 'Resource'])->save();
     NodeType::create(['type' => 'resource_group', 'name' => 'Resource Group'])->save();
+    $both = [$resource, 'resource_group'];
 
-    FieldStorageConfig::create([
-      'field_name' => 'field_cider_resources',
-      'entity_type' => 'node',
-      'type' => 'entity_reference',
+    $this->addField('field_cider_resources', 'entity_reference', ['resource_group'], [
       'cardinality' => -1,
       'settings' => ['target_type' => 'node'],
-    ])->save();
-    FieldConfig::create([
-      'field_name' => 'field_cider_resources',
-      'entity_type' => 'node',
-      'bundle' => 'resource_group',
-      'settings' => ['handler' => 'default'],
-    ])->save();
+    ]);
 
     $linkFields = array_merge(array_keys(self::INHERITED_FIELDS), [self::OWN_FIELD]);
     foreach ($linkFields as $name) {
-      FieldStorageConfig::create([
-        'field_name' => $name,
-        'entity_type' => 'node',
-        'type' => 'link',
-      ])->save();
-      foreach (['access_active_resources_from_cid', 'resource_group'] as $bundle) {
-        FieldConfig::create([
-          'field_name' => $name,
-          'entity_type' => 'node',
-          'bundle' => $bundle,
-        ])->save();
-      }
+      $this->addField($name, 'link', $both);
     }
 
     // getResource() looks a resource up by this field, so the endpoint test
     // needs it even though the link and metrics logic does not.
-    FieldStorageConfig::create([
-      'field_name' => 'field_cider_resource_id',
-      'entity_type' => 'node',
-      'type' => 'string',
-    ])->save();
-    FieldConfig::create([
-      'field_name' => 'field_cider_resource_id',
-      'entity_type' => 'node',
-      'bundle' => 'access_active_resources_from_cid',
-    ])->save();
+    $this->addField('field_cider_resource_id', 'string', [$resource]);
+
+    // getResource() checks whether the resource is listed, which queries these
+    // fields on both bundles.
+    $this->addField('field_rp_listing', 'boolean', $both);
+    $this->addField('field_domain_access', 'entity_reference', $both, [
+      'cardinality' => -1,
+      'settings' => ['target_type' => 'domain'],
+    ]);
 
     // getResource() reads these directly (no hasField() guard), so they must
     // exist for the endpoint test; their values are irrelevant here.
     $endpointFields = [
-      'field_access_global_resource_id',
-      'field_cider_resource_type',
-      'field_access_org_name',
-      'field_cider_latest_status',
-      'field_rp_description',
-      'field_rp_mfa_required',
-      'field_rp_account_required',
-      'field_rp_top_software',
-      'field_rp_ood_software',
+      'string' => [
+        'field_access_global_resource_id',
+        'field_cider_resource_type',
+        'field_access_org_name',
+        'field_cider_latest_status',
+      ],
+      'text_long' => ['field_rp_description'],
+      'boolean' => ['field_rp_mfa_required', 'field_rp_account_required'],
+      'string_long' => [
+        'field_rp_top_software',
+        'field_rp_ood_software',
+        'field_rp_queue_metrics',
+      ],
     ];
+    foreach ($endpointFields as $type => $names) {
+      foreach ($names as $name) {
+        $this->addField($name, $type, [$resource]);
+      }
+    }
+
     // getParagraphData() loads from the paragraph storage, so the module is
     // enabled and the reference fields exist; none holds a paragraph.
     $paragraphFields = [
@@ -116,42 +125,38 @@ class ResourceDocumentationPayloadTest extends KernelTestBase {
       'field_rp_datasets',
     ];
     foreach ($paragraphFields as $name) {
-      FieldStorageConfig::create([
-        'field_name' => $name,
-        'entity_type' => 'node',
-        'type' => 'entity_reference_revisions',
+      $this->addField($name, 'entity_reference_revisions', [$resource], [
         'cardinality' => -1,
         'settings' => ['target_type' => 'paragraph'],
-      ])->save();
-      FieldConfig::create([
-        'field_name' => $name,
-        'entity_type' => 'node',
-        'bundle' => 'access_active_resources_from_cid',
-      ])->save();
-    }
-    foreach ($endpointFields as $name) {
-      FieldStorageConfig::create([
-        'field_name' => $name,
-        'entity_type' => 'node',
-        'type' => 'string_long',
-      ])->save();
-      FieldConfig::create([
-        'field_name' => $name,
-        'entity_type' => 'node',
-        'bundle' => 'access_active_resources_from_cid',
-      ])->save();
+      ]);
     }
 
+    // The endpoint is called directly, but accessCheck(TRUE) queries still run
+    // as the current user, so give it the permission.
+    Role::create(['id' => 'viewer', 'label' => 'Viewer'])
+      ->grantPermission('access content')
+      ->save();
+    $user = User::create(['name' => 'viewer', 'status' => 1, 'roles' => ['viewer']]);
+    $user->save();
+    $this->container->get('current_user')->setAccount($user);
+  }
+
+  /**
+   * Add one field storage and its per-bundle configs.
+   */
+  private function addField(string $name, string $type, array $bundles, array $storage = []): void {
     FieldStorageConfig::create([
-      'field_name' => 'field_rp_queue_metrics',
+      'field_name' => $name,
       'entity_type' => 'node',
-      'type' => 'string_long',
-    ])->save();
-    FieldConfig::create([
-      'field_name' => 'field_rp_queue_metrics',
-      'entity_type' => 'node',
-      'bundle' => 'access_active_resources_from_cid',
-    ])->save();
+      'type' => $type,
+    ] + $storage)->save();
+    foreach ($bundles as $bundle) {
+      FieldConfig::create([
+        'field_name' => $name,
+        'entity_type' => 'node',
+        'bundle' => $bundle,
+      ])->save();
+    }
   }
 
   /**
@@ -335,6 +340,9 @@ class ResourceDocumentationPayloadTest extends KernelTestBase {
     return $method->invoke($controller, $queue);
   }
 
+  /**
+   * Create a published resource whose metrics field holds the given blob.
+   */
   private function makeResourceWithMetrics(array $metrics): Node {
     $node = Node::create([
       'type' => 'access_active_resources_from_cid',
