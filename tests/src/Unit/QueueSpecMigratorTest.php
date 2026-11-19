@@ -16,11 +16,11 @@ use Drupal\Tests\UnitTestCase;
 class QueueSpecMigratorTest extends UnitTestCase {
 
   /**
-   * Bridges-2 GPU has six node types and three queues.
+   * Bridges-2 GPU migrates to node types that list their queues.
    *
    * @covers ::migrate
    */
-  public function testBridges2GpuCollapsesToNodeTypesAndThreeQueues(): void {
+  public function testBridges2GpuCollapsesToNodeTypesWithQueues(): void {
     $result = (new QueueSpecMigrator())->migrate($this->bridges2Gpu());
     $this->assertAllLists($result);
 
@@ -36,70 +36,120 @@ class QueueSpecMigratorTest extends UnitTestCase {
 
     $v100 = $result['node_types'][0];
     $this->assertSame('2x Intel Xeon Gold 6248 "Cascade Lake"', $v100['cpu_type']);
+    $this->assertNull($v100['cpu_architecture']);
     $this->assertSame(40, $v100['cpu_count']);
     $this->assertSame(512, $v100['ram']);
     $this->assertNull($v100['node_count']);
-    $this->assertSame([['type' => 'NVIDIA Tesla V100-32GB SXM2', 'count' => 8, 'vram' => 32]], $v100['gpus']);
-    $this->assertSame(16, $result['node_types'][4]['gpus'][0]['count']);
+    $this->assertNull($v100['description']);
+    $this->assertSame([['type' => 'gpu', 'model' => 'NVIDIA Tesla V100-32GB SXM2', 'count' => 8, 'memory' => 32]], $v100['accelerators']);
+    $this->assertSame(16, $result['node_types'][4]['accelerators'][0]['count']);
+
+    // The queue link lives on the node type, keyed by queue name.
+    $this->assertSame([['name' => 'GPU-shared', 'node_count' => 24], ['name' => 'GPU', 'node_count' => 23]], $v100['queues']);
+    $this->assertSame([['name' => 'GPU-shared', 'node_count' => 10], ['name' => 'GPU', 'node_count' => 10]], $result['node_types'][1]['queues']);
+    $this->assertSame([['name' => 'GPU-small', 'node_count' => 1]], $result['node_types'][5]['queues']);
 
     [$shared, $gpu, $small] = $result['queues'];
-    $this->assertSame(
-      [
-        ['node_type' => 'NVIDIA Tesla V100-32GB SXM2', 'node_count' => 24],
-        ['node_type' => 'NVIDIA H100-80GB SXM5', 'node_count' => 10],
-        ['node_type' => 'NVIDIA V100-16GB', 'node_count' => 9],
-        ['node_type' => 'NVIDIA L40S-48GB', 'node_count' => 3],
-      ],
-      $shared['nodes']
-    );
-    $this->assertCount(5, $gpu['nodes']);
-    $this->assertSame(23, $gpu['nodes'][0]['node_count']);
-    $this->assertSame([['node_type' => 'NVIDIA Tesla V100-32GB SXM2 2', 'node_count' => 1]], $small['nodes']);
     $this->assertSame(2880, $gpu['max_wall_minutes']);
-
-    // Purposes differ per row, so queues have none and node types keep the
-    // first row's text as a description.
-    $this->assertNull($shared['purpose']);
-    $this->assertNull($gpu['purpose']);
-    $this->assertStringStartsWith('V100-32 Node. Jobs using 1 to 4', $v100['description']);
-    $this->assertStringStartsWith('H100-80 Node.', $result['node_types'][1]['description']);
-    $this->assertStringStartsWith('DGX-2 special node.', $result['node_types'][4]['description']);
-    // GPU-small has one row, so its purpose stays on the queue.
+    $this->assertNull($gpu['charged_per']);
+    $this->assertNull($gpu['access']);
+    $this->assertArrayNotHasKey('nodes', $gpu);
+    // Within a queue the first row's purpose is used.
+    $this->assertStringStartsWith('V100-32 Node. Jobs using 1 to 4', $shared['purpose']);
     $this->assertSame('Used for interactive and small or quick GPU jobs on a single V100-32 node.', $small['purpose']);
-    $this->assertNull($result['node_types'][5]['description']);
-    $this->assertReportContains($result, 'different purposes');
   }
 
   /**
-   * ACES gpu_debug shares one purpose across two node types.
+   * Bridges-2 GPU is flagged: the GPU queue's rows have different purposes.
    *
-   * @covers ::migrate
+   * @covers ::flags
    */
-  public function testAcesGpuDebugMergesSharedPurpose(): void {
-    $result = (new QueueSpecMigrator())->migrate($this->aces());
-    $this->assertAllLists($result);
-
-    $queues = array_column($result['queues'], NULL, 'name');
-    $debug = $queues['gpu_debug'];
-    $this->assertSame('Short GPU test and debug runs.', $debug['purpose']);
-    $this->assertSame(120, $debug['max_wall_minutes']);
-    $this->assertSame(
-      [
-        ['node_type' => 'NVIDIA A30', 'node_count' => 3],
-        ['node_type' => 'NVIDIA H100', 'node_count' => 3],
-      ],
-      $debug['nodes']
-    );
-    // The shared purpose is not copied onto node types.
-    $types = array_column($result['node_types'], NULL, 'label');
-    $this->assertNull($types['NVIDIA A30']['description']);
-    $this->assertNull($queues['gh01']['max_wall_minutes']);
-    // gh01 has the same GPU model as gpu but different hardware.
-    $this->assertSame('NVIDIA H100 (480 GB RAM)', $queues['gh01']['nodes'][0]['node_type']);
+  public function testBridges2GpuIsFlaggedForDifferentPurposes(): void {
+    $flags = (new QueueSpecMigrator())->flags($this->bridges2Gpu());
+    $this->assertTrue(array_is_list($flags));
+    $this->assertFlagContains($flags, 'Queue "GPU" has rows with different purposes');
   }
 
   /**
-   * Mixed GPU text splits into one entry per model and is reported.
+   * ACES carries "None" accelerator rows and is flagged.
+   *
+   * @covers ::flags
+   */
+  public function testAcesIsFlaggedForNoneAccelerator(): void {
+    $flags = (new QueueSpecMigrator())->flags($this->aces());
+    $this->assertFlagContains($flags, 'Queue "bittware" has the placeholder accelerator value "None"');
+    $this->assertFlagContains($flags, 'Queue "memverge"');
+  }
+
+  /**
+   * Every placeholder spelling is flagged, ignoring case and whitespace.
+   *
+   * @covers ::flags
+   */
+  public function testEachPlaceholderIsFlagged(): void {
+    foreach (['None', 'none', ' N/A ', 'NA', '-', '0', 0] as $placeholder) {
+      $flags = (new QueueSpecMigrator())->flags([
+        ['name' => 'q', 'cpu_type' => 'EPYC', 'gpu_type' => $placeholder],
+      ]);
+      $this->assertCount(1, $flags, var_export($placeholder, TRUE));
+      $this->assertStringContainsString('"q"', $flags[0]);
+    }
+    $this->assertSame([], (new QueueSpecMigrator())->flags([
+      ['name' => 'q', 'cpu_type' => 'EPYC', 'gpu_type' => 'NVIDIA A100', 'gpu_count' => 4],
+    ]));
+  }
+
+  /**
+   * Rows of one queue with different wall times are flagged.
+   *
+   * @covers ::flags
+   */
+  public function testDifferingWallTimeIsFlagged(): void {
+    $flags = (new QueueSpecMigrator())->flags([
+      ['name' => 'q', 'cpu_type' => 'A', 'max_wall_minutes' => 60],
+      ['name' => 'q', 'cpu_type' => 'B', 'max_wall_minutes' => 30],
+    ]);
+    $this->assertCount(1, $flags);
+    $this->assertStringContainsString('Queue "q" has rows with different max wall times (60, 30)', $flags[0]);
+  }
+
+  /**
+   * Hardware that differs only in formatting is flagged.
+   *
+   * @covers ::flags
+   */
+  public function testFormattingOnlyDifferenceIsFlagged(): void {
+    $flags = (new QueueSpecMigrator())->flags([
+      ['name' => 'a', 'cpu_type' => 'Intel Xeon Gold 6248 (Cascade Lake)', 'cpu_count' => 40, 'ram' => 512],
+      ['name' => 'b', 'cpu_type' => 'Intel  Xeon Gold-6248', 'cpu_count' => 40, 'ram' => 512],
+    ]);
+    $this->assertCount(1, $flags);
+    $this->assertStringContainsString('differs only in formatting', $flags[0]);
+    $this->assertStringContainsString('queue "a"', $flags[0]);
+    $this->assertStringContainsString('queue "b"', $flags[0]);
+
+    // Genuinely different hardware and identical hardware are not flagged.
+    $this->assertSame([], (new QueueSpecMigrator())->flags([
+      ['name' => 'a', 'cpu_type' => 'EPYC 7742', 'cpu_count' => 128],
+      ['name' => 'b', 'cpu_type' => 'EPYC 7763', 'cpu_count' => 128],
+      ['name' => 'c', 'cpu_type' => 'EPYC 7742', 'cpu_count' => 128],
+    ]));
+  }
+
+  /**
+   * A clean resource has no flags.
+   *
+   * @covers ::flags
+   */
+  public function testCleanResourcesAreNotFlagged(): void {
+    $migrator = new QueueSpecMigrator();
+    $this->assertSame([], $migrator->flags($this->expanseCpu()));
+    $this->assertSame([], $migrator->flags($this->deltaGpu()));
+    $this->assertSame([], $migrator->flags([]));
+  }
+
+  /**
+   * Mixed GPU text splits into one GPU accelerator per model.
    *
    * @covers ::migrate
    */
@@ -110,20 +160,19 @@ class QueueSpecMigratorTest extends UnitTestCase {
     $types = array_column($result['node_types'], NULL, 'label');
     $this->assertSame(
       [
-        ['type' => 'AMD MI100', 'count' => NULL, 'vram' => NULL],
-        ['type' => 'AMD MI210', 'count' => NULL, 'vram' => NULL],
+        ['type' => 'gpu', 'model' => 'AMD MI100', 'count' => NULL, 'memory' => NULL],
+        ['type' => 'gpu', 'model' => 'AMD MI210', 'count' => NULL, 'memory' => NULL],
       ],
-      $types['AMD MI100, AMD MI210']['gpus']
+      $types['AMD MI100, AMD MI210']['accelerators']
     );
     $this->assertSame(2048, $types['AMD MI100, AMD MI210']['ram']);
-    // gpuMI100x8 and its interactive twin share one node type.
-    $queues = array_column($result['queues'], NULL, 'name');
-    $this->assertSame('AMD MI100, AMD MI210', $queues['gpuMI100x8']['nodes'][0]['node_type']);
-    $this->assertSame('AMD MI100, AMD MI210', $queues['gpuMI100x8-interactive']['nodes'][0]['node_type']);
+    $queueNames = array_column($types['AMD MI100, AMD MI210']['queues'], 'name');
+    $this->assertContains('gpuMI100x8', $queueNames);
+    $this->assertContains('gpuMI100x8-interactive', $queueNames);
     $this->assertCount(12, $result['queues']);
     $this->assertReportContains($result, 'AMD MI100, AMD MI210');
     $this->assertReportContains($result, 'count 8, vRAM 32');
-    $this->assertSame([['type' => 'NVIDIA A40', 'count' => 4, 'vram' => 48]], $types['NVIDIA A40']['gpus']);
+    $this->assertSame([['type' => 'gpu', 'model' => 'NVIDIA A40', 'count' => 4, 'memory' => 48]], $types['NVIDIA A40']['accelerators']);
   }
 
   /**
@@ -131,60 +180,74 @@ class QueueSpecMigratorTest extends UnitTestCase {
    *
    * @covers ::migrate
    */
+  /**
+   * A GPU count without a model is kept, as Expanse's ind-gpu documents it.
+   */
+  public function testGpuCountWithoutModelIsKept(): void {
+    $result = (new QueueSpecMigrator())->migrate([
+      ['name' => 'ind-gpu', 'node_count' => 4, 'cpu_count' => 160, 'gpu_count' => 4, 'ram' => 1024, 'max_wall_minutes' => 2880],
+    ]);
+    $this->assertSame(
+      [['type' => 'gpu', 'model' => NULL, 'count' => 4, 'memory' => NULL]],
+      $result['node_types'][0]['accelerators']
+    );
+    $this->assertReportContains($result, 'no GPU model');
+  }
+
+  /**
+   * A row with no queue name becomes a node type that serves no queue.
+   */
+  public function testUnnamedRowBecomesNodeTypeWithoutQueue(): void {
+    $result = (new QueueSpecMigrator())->migrate([
+      ['name' => '', 'node_count' => 16, 'cpu_type' => 'AMD Milan', 'cpu_count' => 128, 'gpu_type' => 'Nvidia H100'],
+    ]);
+    $this->assertSame([], $result['queues']);
+    $this->assertCount(1, $result['node_types']);
+    $this->assertSame('Nvidia H100', $result['node_types'][0]['label']);
+    $this->assertSame(16, $result['node_types'][0]['node_count']);
+    $this->assertSame([], $result['node_types'][0]['queues']);
+    $this->assertReportContains($result, 'serves no queue');
+  }
+
   public function testPlusSeparatesGpuModels(): void {
     $result = (new QueueSpecMigrator())->migrate([
-      ['name' => 'q', 'gpu_type' => 'NVIDIA A100 + NVIDIA L40S', 'gpu_count' => 2, 'gpu_vram' => NULL, 'cpu_type' => 'EPYC'],
+      [
+        'name' => 'q',
+        'gpu_type' => 'NVIDIA A100 + NVIDIA L40S',
+        'gpu_count' => 2,
+        'gpu_vram' => NULL,
+        'cpu_type' => 'EPYC',
+      ],
     ]);
-    $this->assertSame(['NVIDIA A100', 'NVIDIA L40S'], array_column($result['node_types'][0]['gpus'], 'type'));
+    $this->assertSame(['NVIDIA A100', 'NVIDIA L40S'], array_column($result['node_types'][0]['accelerators'], 'model'));
   }
 
   /**
-   * GPU type "None" means no GPU, so equal CPU-only rows merge.
-   *
-   * On ACES the four no-GPU queues share one node type, and the report asks a
-   * person to split it, since bittware and memverge are different hardware.
+   * A placeholder GPU type migrates as no accelerator.
    *
    * @covers ::migrate
    */
-  public function testPlaceholderGpuMeansNoGpu(): void {
-    $result = (new QueueSpecMigrator())->migrate($this->aces());
-    $this->assertAllLists($result);
-
-    $label = 'Intel Xeon 8468 (Sapphire Rapids)';
-    $types = array_column($result['node_types'], NULL, 'label');
-    $queues = array_column($result['queues'], NULL, 'name');
-    $this->assertArrayHasKey($label, $types);
-    $this->assertSame([], $types[$label]['gpus']);
-    $this->assertSame(96, $types[$label]['cpu_count']);
-    $this->assertSame(512, $types[$label]['ram']);
-    $expected = ['bittware' => 2, 'nextsilicon' => 2, 'memverge' => 10, 'cpu' => 88];
-    foreach ($expected as $name => $count) {
-      $this->assertSame([['node_type' => $label, 'node_count' => $count]], $queues[$name]['nodes'], $name);
-    }
-    $this->assertCount(6, $result['node_types']);
-    $this->assertReportContains($result, 'Queues "bittware", "nextsilicon", "memverge", "cpu" share node type "' . $label . '"');
-    $this->assertSame('CPU-only jobs that need no accelerator; the default choice for general compute.', $queues['cpu']['purpose']);
-    $this->assertSame(4320, $queues['cpu']['max_wall_minutes']);
-  }
-
-  /**
-   * A CPU-only resource gets no "share node type" report line.
-   *
-   * @covers ::migrate
-   */
-  public function testCpuOnlyResourceMergesWithoutReport(): void {
-    $row = ['cpu_type' => '2x AMD EPYC 7763 "Milan"', 'cpu_count' => 128, 'ram' => 256, 'gpu_type' => 'None', 'gpu_count' => 0, 'gpu_vram' => 0];
+  public function testPlaceholderGpuMeansNoAccelerator(): void {
+    $row = [
+      'cpu_type' => '2x AMD EPYC 7763 "Milan"',
+      'cpu_count' => 128,
+      'ram' => 256,
+      'gpu_type' => 'None',
+      'gpu_count' => 0,
+      'gpu_vram' => 0,
+    ];
     $result = (new QueueSpecMigrator())->migrate([
       ['name' => 'cpu', 'node_count' => 132] + $row,
       ['name' => 'cpu-preempt', 'node_count' => 132] + $row,
     ]);
     $this->assertCount(1, $result['node_types']);
     $this->assertSame('2x AMD EPYC 7763 "Milan"', $result['node_types'][0]['label']);
+    $this->assertSame([], $result['node_types'][0]['accelerators']);
     $this->assertSame([], $result['report']);
   }
 
   /**
-   * Entirely blank rows also stay separate and use the queue name.
+   * Rows with every hardware field blank become one node type per queue.
    *
    * @covers ::migrate
    */
@@ -195,12 +258,14 @@ class QueueSpecMigratorTest extends UnitTestCase {
     ]);
     $this->assertAllLists($result);
     $this->assertSame(['alpha', 'beta'], array_column($result['node_types'], 'label'));
-    $this->assertSame([], $result['node_types'][0]['gpus']);
+    $this->assertSame([], $result['node_types'][0]['accelerators']);
+    $this->assertSame([['name' => 'alpha', 'node_count' => 3]], $result['node_types'][0]['queues']);
+    $this->assertSame([['name' => 'beta', 'node_count' => 4]], $result['node_types'][1]['queues']);
     $this->assertReportContains($result, 'Queue "alpha" has no hardware entered');
   }
 
   /**
-   * Expanse CPU queues point to one node type with their own counts.
+   * Expanse CPU's four queues become one node type with per-queue counts.
    *
    * @covers ::migrate
    */
@@ -208,22 +273,21 @@ class QueueSpecMigratorTest extends UnitTestCase {
     $result = (new QueueSpecMigrator())->migrate($this->expanseCpu());
     $this->assertAllLists($result);
 
-    $counts = [];
-    foreach ($result['queues'] as $queue) {
-      $this->assertCount(1, $queue['nodes']);
-      $counts[$queue['name']] = [$queue['nodes'][0]['node_type'], $queue['nodes'][0]['node_count']];
-    }
+    $this->assertCount(2, $result['node_types']);
+    $standard = $result['node_types'][0];
+    $this->assertSame('AMD EPYC 7742', $standard['label']);
     $this->assertSame(
       [
-        'compute' => ['AMD EPYC 7742', 734],
-        'debug' => ['AMD EPYC 7742', 2],
-        'preempt' => ['AMD EPYC 7742', 726],
-        'large-shared' => ['AMD EPYC 7742 (2000 GB RAM)', 4],
-        'shared' => ['AMD EPYC 7742', 734],
+        ['name' => 'compute', 'node_count' => 734],
+        ['name' => 'debug', 'node_count' => 2],
+        ['name' => 'preempt', 'node_count' => 726],
+        ['name' => 'shared', 'node_count' => 734],
       ],
-      $counts
+      $standard['queues']
     );
-    $this->assertSame([], $result['node_types'][0]['gpus']);
+    $this->assertSame([['name' => 'large-shared', 'node_count' => 4]], $result['node_types'][1]['queues']);
+    $this->assertSame([], $standard['accelerators']);
+    $this->assertSame(['compute', 'debug', 'preempt', 'large-shared', 'shared'], array_column($result['queues'], 'name'));
     $this->assertSame(30, $result['queues'][1]['max_wall_minutes']);
     $this->assertSame(10080, $result['queues'][2]['max_wall_minutes']);
     $this->assertSame('Compute Node Usage', $result['queues'][0]['purpose']);
@@ -277,18 +341,19 @@ class QueueSpecMigratorTest extends UnitTestCase {
   }
 
   /**
-   * Differing max wall times use the first non-empty value and are reported.
+   * Within a queue the first row's purpose and wall time are used.
    *
    * @covers ::migrate
    */
-  public function testDifferingMaxWallIsReported(): void {
+  public function testQueueTakesFirstRow(): void {
     $result = (new QueueSpecMigrator())->migrate([
-      ['name' => 'q', 'cpu_type' => 'A', 'max_wall_minutes' => NULL],
-      ['name' => 'q', 'cpu_type' => 'B', 'max_wall_minutes' => 60],
-      ['name' => 'q', 'cpu_type' => 'C', 'max_wall_minutes' => 30],
+      ['name' => 'q', 'cpu_type' => 'A', 'purpose' => 'First', 'max_wall_minutes' => 60],
+      ['name' => 'q', 'cpu_type' => 'B', 'purpose' => 'Second', 'max_wall_minutes' => 30],
     ]);
+    $this->assertCount(1, $result['queues']);
+    $this->assertSame('First', $result['queues'][0]['purpose']);
     $this->assertSame(60, $result['queues'][0]['max_wall_minutes']);
-    $this->assertReportContains($result, 'different max wall times');
+    $this->assertCount(2, $result['node_types']);
   }
 
   /**
@@ -304,7 +369,8 @@ class QueueSpecMigratorTest extends UnitTestCase {
     $this->assertAllLists($result);
     $this->assertSame(['2', '1'], array_column($result['queues'], 'name'));
     $this->assertSame(['2', '1'], array_column($result['node_types'], 'label'));
-    $this->assertSame('2', $result['queues'][0]['nodes'][0]['node_type']);
+    $this->assertSame([['name' => '2', 'node_count' => 5]], $result['node_types'][0]['queues']);
+    $this->assertSame('2', $result['node_types'][0]['queues'][0]['name']);
   }
 
   /**
@@ -314,6 +380,36 @@ class QueueSpecMigratorTest extends UnitTestCase {
    */
   public function testEmptyInput(): void {
     $this->assertSame(['node_types' => [], 'queues' => [], 'report' => []], (new QueueSpecMigrator())->migrate([]));
+  }
+
+  /**
+   * The legacy hash is stable, key-order independent and row-order sensitive.
+   *
+   * @covers ::legacyHash
+   */
+  public function testLegacyHash(): void {
+    $rows = $this->expanseCpu();
+    $hash = QueueSpecMigrator::legacyHash($rows);
+    $this->assertMatchesRegularExpression('/^[0-9a-f]{64}$/', $hash);
+    $this->assertSame($hash, QueueSpecMigrator::legacyHash($rows));
+
+    // Key order within a row does not matter.
+    $reordered = array_map(static fn (array $row) => array_reverse($row, TRUE), $rows);
+    $this->assertSame($hash, QueueSpecMigrator::legacyHash($reordered));
+
+    // Row order does.
+    $this->assertNotSame($hash, QueueSpecMigrator::legacyHash(array_reverse($rows)));
+
+    // A changed value does.
+    $edited = $rows;
+    $edited[0]['node_count'] = 735;
+    $this->assertNotSame($hash, QueueSpecMigrator::legacyHash($edited));
+
+    // Pinned value, so an accidental change to the algorithm is caught.
+    $this->assertSame(
+      hash('sha256', '[{"a":1,"b":"x","c":null}]'),
+      QueueSpecMigrator::legacyHash([['c' => NULL, 'b' => 'x', 'a' => 1]])
+    );
   }
 
   /**
@@ -327,11 +423,27 @@ class QueueSpecMigratorTest extends UnitTestCase {
     $this->assertTrue(array_is_list($result['queues']));
     $this->assertTrue(array_is_list($result['report']));
     foreach ($result['node_types'] as $type) {
-      $this->assertTrue(array_is_list($type['gpus']));
+      $this->assertTrue(array_is_list($type['accelerators']));
+      $this->assertTrue(array_is_list($type['queues']));
     }
-    foreach ($result['queues'] as $queue) {
-      $this->assertTrue(array_is_list($queue['nodes']));
+  }
+
+  /**
+   * Asserts some flag contains the text.
+   *
+   * @param list<string> $flags
+   *   The flags.
+   * @param string $needle
+   *   Text to find.
+   */
+  private function assertFlagContains(array $flags, string $needle): void {
+    foreach ($flags as $flag) {
+      if (str_contains($flag, $needle)) {
+        $this->addToAssertionCount(1);
+        return;
+      }
     }
+    $this->fail("No flag contains \"$needle\": " . implode(' | ', $flags));
   }
 
   /**

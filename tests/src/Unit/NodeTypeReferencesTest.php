@@ -14,16 +14,16 @@ use Drupal\Tests\UnitTestCase;
 class NodeTypeReferencesTest extends UnitTestCase {
 
   /**
-   * Labels that exist and are referenced produce no errors.
+   * Valid labels, queue names and references produce no errors.
    *
    * @covers ::errors
    */
   public function testValidReferencesHaveNoErrors(): void {
-    $queues = [
-      ['name' => 'gpu', 'node_types' => ['A100 node', 'H100 node']],
-      ['name' => 'cpu', 'node_types' => ['Standard']],
+    $nodeTypes = [
+      ['label' => 'A100 node', 'queues' => ['gpu', 'gpu-debug']],
+      ['label' => 'Standard', 'queues' => ['cpu']],
     ];
-    $this->assertSame([], NodeTypeReferences::errors(['A100 node', 'H100 node', 'Standard'], $queues));
+    $this->assertSame([], NodeTypeReferences::errors(['A100 node', 'Standard'], ['gpu', 'gpu-debug', 'cpu'], $nodeTypes));
   }
 
   /**
@@ -32,47 +32,57 @@ class NodeTypeReferencesTest extends UnitTestCase {
    * @covers ::errors
    */
   public function testDuplicateLabelIsReported(): void {
-    $errors = NodeTypeReferences::errors(['A100 node', 'A100 node', 'A100 node', 'Other'], []);
+    $errors = NodeTypeReferences::errors(['A100 node', 'A100 node', 'A100 node', 'Other'], [], []);
     $this->assertCount(1, $errors);
-    $this->assertStringContainsString('A100 node', $errors[0]);
+    $this->assertStringContainsString('Node type label "A100 node"', $errors[0]);
   }
 
   /**
-   * A queue pointing at a renamed node type names the queue and the label.
+   * A queue name used twice is reported once.
    *
    * @covers ::errors
    */
-  public function testRenamedNodeTypeIsReported(): void {
+  public function testDuplicateQueueNameIsReported(): void {
+    $errors = NodeTypeReferences::errors([], ['gpu', 'cpu', 'gpu', 'gpu'], []);
+    $this->assertSame(['Queue name "gpu" is used more than once.'], $errors);
+  }
+
+  /**
+   * A node type naming a missing queue is reported with both names.
+   *
+   * @covers ::errors
+   */
+  public function testMissingQueueIsReported(): void {
     $errors = NodeTypeReferences::errors(
-      ['H100 node'],
-      [['name' => 'gpu', 'node_types' => ['A100 node']]],
+      ['A100'],
+      ['gpu'],
+      [['label' => 'A100', 'queues' => ['gpu', 'gpu-debug']]],
     );
-    $this->assertCount(1, $errors);
-    $this->assertStringContainsString('gpu', $errors[0]);
-    $this->assertStringContainsString('A100 node', $errors[0]);
+    $this->assertSame(['Node type "A100" lists queue "gpu-debug", which does not exist on this resource.'], $errors);
   }
 
   /**
-   * Blank references and blank labels are ignored.
+   * Blank labels, queue names and references are ignored.
    *
    * @covers ::errors
    */
-  public function testBlankReferenceIsIgnored(): void {
+  public function testBlankValuesAreIgnored(): void {
     $errors = NodeTypeReferences::errors(
       ['A', '', '  ', ''],
-      [['name' => 'q', 'node_types' => ['', '   ', 'A']]],
+      ['q', '', ' '],
+      [['label' => 'A', 'queues' => ['', '   ', 'q']]],
     );
     $this->assertSame([], $errors);
   }
 
   /**
-   * Numeric-looking labels are compared as strings.
+   * Numeric-looking values are compared as strings.
    *
    * @covers ::errors
    */
-  public function testNumericLabels(): void {
-    $this->assertSame([], NodeTypeReferences::errors(['1', '2'], [['name' => 'q', 'node_types' => ['2', '1']]]));
-    $errors = NodeTypeReferences::errors(['1', '1', '2'], [['name' => 'q', 'node_types' => ['3']]]);
+  public function testNumericValues(): void {
+    $this->assertSame([], NodeTypeReferences::errors(['1', '2'], ['1', '2'], [['label' => '1', 'queues' => ['2', '1']]]));
+    $errors = NodeTypeReferences::errors(['1', '1', '2'], ['1'], [['label' => '2', 'queues' => ['3']]]);
     $this->assertCount(2, $errors);
     $this->assertStringContainsString('"1"', $errors[0]);
     $this->assertStringContainsString('"3"', $errors[1]);
@@ -86,10 +96,12 @@ class NodeTypeReferencesTest extends UnitTestCase {
    */
   public function testWhitespaceIsTrimmed(): void {
     $this->assertSame('A100 node', NodeTypeReferences::normalize("  A100 node\t"));
-    $this->assertSame([], NodeTypeReferences::errors([' A100 node'], [['name' => 'q', 'node_types' => ['A100 node ']]]));
-    $this->assertCount(1, NodeTypeReferences::errors(['A', ' A'], []));
+    $nodeTypes = [['label' => 'A100 node ', 'queues' => [' gpu']]];
+    $this->assertSame([], NodeTypeReferences::errors([' A100 node'], ['gpu '], $nodeTypes));
+    $this->assertCount(1, NodeTypeReferences::errors(['A', ' A'], [], []));
+    $this->assertCount(1, NodeTypeReferences::errors([], ['q', ' q'], []));
     // Case-sensitive.
-    $this->assertCount(1, NodeTypeReferences::errors(['a'], [['name' => 'q', 'node_types' => ['A']]]));
+    $this->assertCount(1, NodeTypeReferences::errors(['a'], ['q'], [['label' => 'a', 'queues' => ['Q']]]));
   }
 
 }

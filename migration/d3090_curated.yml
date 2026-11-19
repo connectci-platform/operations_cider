@@ -1,0 +1,549 @@
+# D8-3090 curated node type migrations, keyed by global resource id.
+#
+# The operations_cider_deploy_d3090_01_node_types deploy hook applies an entry
+# only while legacy_hash still matches the resource's legacy queue rows; if
+# the rows were edited after the entry was written, the resource is skipped
+# and reported. Each entry covers a resource that the automatic merge flags.
+#
+# Review: drush operations_cider:d3090-summary
+# Draft a new entry: drush operations_cider:d3090-draft <global id>
+#
+# Values were taken from the legacy queue rows and the resource's own jobs
+# text. charged_per and access are only set where that text states them;
+# blank means unknown.
+
+anvil.purdue.access-ci.org:
+  title: 'Anvil CPU'
+  legacy_hash: 7aa84d1eadf1900ac388cf92a8cdc8b502d4a7795b2085541a91142692ae35b5
+  notes: 'Flagged only for the "None" accelerator placeholder. Charging is from the jobs text: shared by cores or memory share, wholenode and wide node-exclusive; highmem is charged at a higher rate, which charged_per cannot express.'
+  node_types:
+    - label: 'Regular memory node'
+      description: null
+      node_count: null
+      cpu_type: '2x AMD EPYC 7763'
+      cpu_architecture: x86_64
+      cpu_count: 128
+      ram: 256
+      accelerators: []
+      queues:
+        - { name: shared, node_count: 250 }
+        - { name: debug, node_count: 17 }
+        - { name: wide, node_count: 746 }
+        - { name: wholenode, node_count: 750 }
+    - label: 'Large memory node'
+      description: null
+      node_count: null
+      cpu_type: '2x AMD EPYC 7763'
+      cpu_architecture: x86_64
+      cpu_count: 128
+      ram: 1000
+      accelerators: []
+      queues:
+        - { name: highmem, node_count: 32 }
+  queues:
+    - name: highmem
+      purpose: 'Jobs that need more memory on one node than a regular node provides. Charged at a higher rate, so use it only when the memory is the reason.'
+      max_wall_minutes: 2880
+      charged_per: null
+      access: batch
+    - name: shared
+      purpose: 'Jobs that need only part of a node, charged for the cores or the memory share you request. This is where your job goes if you do not name a partition.'
+      max_wall_minutes: 5760
+      charged_per: core
+      access: batch
+    - name: debug
+      purpose: 'Short test and debugging runs, with priority access so you wait less. Use it before submitting production work.'
+      max_wall_minutes: 120
+      charged_per: null
+      access: batch
+    - name: wide
+      purpose: 'Large multi-node jobs that need many nodes for a short time. Node-exclusive.'
+      max_wall_minutes: 720
+      charged_per: node
+      access: batch
+    - name: wholenode
+      purpose: 'Production runs that need whole nodes to themselves. Use this for most multi-node work.'
+      max_wall_minutes: 5760
+      charged_per: node
+      access: batch
+
+kyric.uky.access-ci.org:
+  title: 'KyRIC'
+  legacy_hash: d3213616a64ef6f211085fe5d3cc6cd3e19d6c47982955bd9e8cdc39326eed52
+  notes: 'Flagged only for the "None" accelerator placeholder. Jobs are single-node and charged for all 40 cores while the node is held.'
+  node_types:
+    - label: 'Large memory node'
+      description: null
+      node_count: 5
+      cpu_type: 'Intel Xeon E7-4820 v4'
+      cpu_architecture: x86_64
+      cpu_count: 40
+      ram: 3000
+      accelerators: []
+      queues:
+        - { name: normal, node_count: 5 }
+  queues:
+    - name: normal
+      purpose: 'All production batch work on KyRIC; single-node jobs that need a full large-memory node'
+      max_wall_minutes: 4320
+      charged_per: node
+      access: batch
+
+bridges2-gpu.psc.access-ci.org:
+  title: 'Bridges-2 GPU'
+  legacy_hash: e8e23a7432909bb9e10440d07f0b29a157be7dffe28697dda2d0a0e7adebb993
+  notes: 'The GPU and GPU-shared rows carried one purpose per node type. Each queue now has one purpose, and the charging that was in the text is in charged_per: GPU-shared per GPU, GPU for the full node. The GPU-small row lacked "Cascade Lake" in its CPU text but is the same V100-32 node.'
+  node_types:
+    - label: 'V100-32'
+      description: null
+      node_count: null
+      cpu_type: '2x Intel Xeon Gold 6248 "Cascade Lake"'
+      cpu_architecture: x86_64
+      cpu_count: 40
+      ram: 512
+      accelerators:
+        - { type: gpu, model: 'NVIDIA Tesla V100-32GB SXM2', count: 8, memory: 32 }
+      queues:
+        - { name: GPU-shared, node_count: 24 }
+        - { name: GPU, node_count: 23 }
+        - { name: GPU-small, node_count: 1 }
+    - label: 'H100-80'
+      description: null
+      node_count: null
+      cpu_type: '2x Intel Xeon "Sapphire Rapids" 8470'
+      cpu_architecture: x86_64
+      cpu_count: 104
+      ram: 2000
+      accelerators:
+        - { type: gpu, model: 'NVIDIA H100-80GB SXM5', count: 8, memory: 80 }
+      queues:
+        - { name: GPU-shared, node_count: 10 }
+        - { name: GPU, node_count: 10 }
+    - label: 'V100-16'
+      description: null
+      node_count: null
+      cpu_type: '2x Intel Xeon Gold 6148'
+      cpu_architecture: x86_64
+      cpu_count: 40
+      ram: 192
+      accelerators:
+        - { type: gpu, model: 'NVIDIA V100-16GB', count: 8, memory: 16 }
+      queues:
+        - { name: GPU-shared, node_count: 9 }
+        - { name: GPU, node_count: 9 }
+    - label: 'L40S-48'
+      description: null
+      node_count: null
+      cpu_type: '2x Intel Xeon 6740E'
+      cpu_architecture: x86_64
+      cpu_count: 192
+      ram: 1000
+      accelerators:
+        - { type: gpu, model: 'NVIDIA L40S-48GB', count: 8, memory: 48 }
+      queues:
+        - { name: GPU-shared, node_count: 3 }
+        - { name: GPU, node_count: 3 }
+    - label: 'DGX-2'
+      description: 'Special node with 16 V100-32 GPUs.'
+      node_count: 1
+      cpu_type: '2x Intel Xeon Platinum 8168'
+      cpu_architecture: x86_64
+      cpu_count: 48
+      ram: 1500
+      accelerators:
+        - { type: gpu, model: 'NVIDIA Volta V100-32GB', count: 16, memory: 32 }
+      queues:
+        - { name: GPU, node_count: 1 }
+  queues:
+    - name: GPU-shared
+      purpose: 'Jobs using 1 to 4 GPUs on a single node, shared with other jobs; charged per GPU.'
+      max_wall_minutes: 2880
+      charged_per: gpu
+      access: batch
+    - name: GPU
+      purpose: 'Jobs using one or more whole nodes, all eight GPUs each (16 on the DGX-2); charged for the full node.'
+      max_wall_minutes: 2880
+      charged_per: node
+      access: batch
+    - name: GPU-small
+      purpose: 'Used for interactive and small or quick GPU jobs on a single V100-32 node.'
+      max_wall_minutes: 2880
+      charged_per: null
+      access: null
+
+delta-cpu.ncsa.access-ci.org:
+  title: 'Delta CPU'
+  legacy_hash: 95764c06a7c338e985e2c583b10c249f8bc5fa087593a66ce51f0faa6a20a043
+  notes: 'Flagged only for the "None" accelerator placeholder. Nodes are shared by default, but the text does not say how a job is charged, so charged_per is blank.'
+  node_types:
+    - label: 'CPU node'
+      description: null
+      node_count: 132
+      cpu_type: '2x AMD EPYC 7763 "Milan"'
+      cpu_architecture: x86_64
+      cpu_count: 128
+      ram: 256
+      accelerators: []
+      queues:
+        - { name: cpu, node_count: 132 }
+        - { name: cpu-preempt, node_count: 132 }
+        - { name: cpu-interactive, node_count: 132 }
+  queues:
+    - name: cpu
+      purpose: 'Standard production batch work - the queue to use unless you need one of the others'
+      max_wall_minutes: 2880
+      charged_per: null
+      access: batch
+    - name: cpu-preempt
+      purpose: 'Checkpointing-capable CPU jobs that can tolerate interruption and loss of unsaved progress'
+      max_wall_minutes: 2880
+      charged_per: null
+      access: batch
+    - name: cpu-interactive
+      purpose: 'Short interactive CPU sessions for development, testing, debugging, compiling, and other interactive work; maximum 4 nodes per job'
+      max_wall_minutes: 60
+      charged_per: null
+      access: interactive
+
+aces.tamu.access-ci.org:
+  title: 'ACES'
+  legacy_hash: 627d1aaf10c2609b40c90396a2d6d330ff93e9aa3b41486e6598f5737e23ebf0
+  notes: 'The bittware, nextsilicon, memverge and cpu rows all carried the Sapphire Rapids hardware with GPU "None", because the FPGA, NextSilicon and Optane hardware had nowhere to go; each is now its own node type. PLEASE CHECK the accelerator models and counts the legacy rows did not have: the BittWare FPGA model, the NextSilicon model, and the PVC card count (the jobs text says 2 to 8 per node). Accelerators attach through a composable fabric, so node counts overlap between queues.'
+  node_types:
+    - label: 'NEC Vector Engine node'
+      description: null
+      node_count: 1
+      cpu_type: 'Intel Xeon 8268 (Cascade Lake)'
+      cpu_architecture: x86_64
+      cpu_count: 48
+      ram: 768
+      accelerators:
+        - { type: vector_engine, model: 'NEC Vector Engine Type 20B-P', count: 8, memory: 48 }
+      queues:
+        - { name: nec, node_count: 1 }
+    - label: 'BittWare FPGA node'
+      description: null
+      node_count: null
+      cpu_type: 'Intel Xeon 8468 (Sapphire Rapids)'
+      cpu_architecture: x86_64
+      cpu_count: 96
+      ram: 512
+      accelerators:
+        - { type: fpga, model: 'BittWare IA-840F', count: null, memory: null }
+      queues:
+        - { name: bittware, node_count: 2 }
+    - label: 'NextSilicon node'
+      description: null
+      node_count: null
+      cpu_type: 'Intel Xeon 8468 (Sapphire Rapids)'
+      cpu_architecture: x86_64
+      cpu_count: 96
+      ram: 512
+      accelerators:
+        - { type: other, model: 'NextSilicon coprocessor', count: null, memory: null }
+      queues:
+        - { name: nextsilicon, node_count: 2 }
+    - label: 'H100 node'
+      description: null
+      node_count: null
+      cpu_type: 'Intel Xeon 8468 (Sapphire Rapids)'
+      cpu_architecture: x86_64
+      cpu_count: 96
+      ram: 512
+      accelerators:
+        - { type: gpu, model: 'NVIDIA H100', count: 2, memory: 80 }
+      queues:
+        - { name: gpu, node_count: 8 }
+        - { name: gpu_debug, node_count: 3 }
+    - label: 'A30 node'
+      description: null
+      node_count: null
+      cpu_type: 'Intel Xeon 8468 (Sapphire Rapids)'
+      cpu_architecture: x86_64
+      cpu_count: 96
+      ram: 512
+      accelerators:
+        - { type: gpu, model: 'NVIDIA A30', count: 2, memory: 24 }
+      queues:
+        - { name: gpu_debug, node_count: 3 }
+    - label: 'Intel PVC node'
+      description: 'Nodes carry 2 to 8 Intel GPU Max cards, depending on the node.'
+      node_count: null
+      cpu_type: 'Intel Xeon 8468 (Sapphire Rapids)'
+      cpu_architecture: x86_64
+      cpu_count: 96
+      ram: 512
+      accelerators:
+        - { type: gpu, model: 'Intel Data Center GPU Max 1100 (Ponte Vecchio)', count: null, memory: 48 }
+      queues:
+        - { name: pvc, node_count: 30 }
+    - label: 'MemVerge node'
+      description: 'Expands RAM with Intel Optane through MemVerge Memory Machine.'
+      node_count: null
+      cpu_type: 'Intel Xeon 8468 (Sapphire Rapids)'
+      cpu_architecture: x86_64
+      cpu_count: 96
+      ram: 512
+      accelerators: []
+      queues:
+        - { name: memverge, node_count: 10 }
+    - label: 'CPU node'
+      description: null
+      node_count: null
+      cpu_type: 'Intel Xeon 8468 (Sapphire Rapids)'
+      cpu_architecture: x86_64
+      cpu_count: 96
+      ram: 512
+      accelerators: []
+      queues:
+        - { name: cpu, node_count: 88 }
+    - label: 'Grace Hopper (gh01)'
+      description: 'Grace-Hopper node with unified CPU-GPU memory over NVLink.'
+      node_count: 1
+      cpu_type: 'ARM Neoverse V2 (NVIDIA Grace ARM)'
+      cpu_architecture: arm
+      cpu_count: 72
+      ram: 480
+      accelerators:
+        - { type: gpu, model: 'NVIDIA H100', count: 1, memory: 96 }
+      queues:
+        - { name: gh01, node_count: 1 }
+  queues:
+    - name: nec
+      purpose: 'Memory-bandwidth-bound, vectorizable code such as sparse linear algebra, where throughput limits performance more than compute.'
+      max_wall_minutes: 2880
+      charged_per: null
+      access: batch
+    - name: bittware
+      purpose: 'Custom hardware acceleration on FPGAs, for algorithms that gain from a tailored datapath instead of a fixed CPU or GPU.'
+      max_wall_minutes: 2880
+      charged_per: null
+      access: batch
+    - name: nextsilicon
+      purpose: 'Speeding up existing HPC code on a coprocessor that profiles the run and reconfigures to it, with no code rewrite.'
+      max_wall_minutes: 2880
+      charged_per: null
+      access: by_request
+    - name: gpu
+      purpose: 'GPU-accelerated work such as deep-learning training and CUDA applications.'
+      max_wall_minutes: 2880
+      charged_per: null
+      access: batch
+    - name: memverge
+      purpose: 'Large-memory jobs that use MemVerge Memory Machine to expand RAM with Intel Optane, for working sets that exceed a node''s normal memory.'
+      max_wall_minutes: 2880
+      charged_per: null
+      access: batch
+    - name: pvc
+      purpose: 'AI/ML and HPC written with Intel''s oneAPI/SYCL, or CUDA code ported to Intel GPUs.'
+      max_wall_minutes: 2880
+      charged_per: null
+      access: batch
+    - name: cpu
+      purpose: 'CPU-only jobs that need no accelerator; the default choice for general compute.'
+      max_wall_minutes: 4320
+      charged_per: null
+      access: batch
+    - name: gpu_debug
+      purpose: 'Short GPU test and debug runs.'
+      max_wall_minutes: 120
+      charged_per: null
+      access: batch
+    - name: gh01
+      purpose: 'Not a batch partition. GPU work that outgrows normal GPU memory, using Grace-Hopper''s unified CPU-GPU memory and fast NVLink; reached over SSH, not Slurm.'
+      max_wall_minutes: null
+      charged_per: null
+      access: interactive
+
+stampede3.tacc.access-ci.org:
+  title: 'Stampede3'
+  legacy_hash: 844c56ac990ba52ddc59939eeb7c7a9b4eaae1d2fffb8c3cd824f9e65524f31e
+  notes: 'Flagged only for the "None" accelerator placeholder. TACC does not share nodes and charges node-hours, so every queue is charged per node. The legacy PVC vRAM of 124 GB is kept as entered; please check it.'
+  node_types:
+    - label: 'NVDIMM large memory node'
+      description: null
+      node_count: 3
+      cpu_type: '2x Intel Xeon Platinum 8380'
+      cpu_architecture: x86_64
+      cpu_count: 80
+      ram: 4000
+      accelerators: []
+      queues:
+        - { name: nvdimm, node_count: 3 }
+    - label: 'PVC GPU node'
+      description: null
+      node_count: 20
+      cpu_type: '2x Intel Xeon Platinum 8480'
+      cpu_architecture: x86_64
+      cpu_count: 96
+      ram: 1000
+      accelerators:
+        - { type: gpu, model: 'Intel Data Center GPU Max 1550', count: 4, memory: 124 }
+      queues:
+        - { name: pvc, node_count: 20 }
+    - label: 'H100 GPU node'
+      description: null
+      node_count: 24
+      cpu_type: '2x Intel Xeon Platinum 8468'
+      cpu_architecture: x86_64
+      cpu_count: 96
+      ram: 1000
+      accelerators:
+        - { type: gpu, model: 'NVIDIA H100 SXM5', count: 4, memory: 96 }
+      queues:
+        - { name: h100, node_count: 24 }
+    - label: 'Ice Lake (ICX) node'
+      description: null
+      node_count: 224
+      cpu_type: '2x Intel Xeon Platinum 8380'
+      cpu_architecture: x86_64
+      cpu_count: 80
+      ram: 256
+      accelerators: []
+      queues:
+        - { name: icx, node_count: 224 }
+    - label: 'Sapphire Rapids HBM (SPR) node'
+      description: '128 GB of on-package high-bandwidth memory and no DDR.'
+      node_count: 560
+      cpu_type: '2x Intel Xeon CPU MAX 9480'
+      cpu_architecture: x86_64
+      cpu_count: 112
+      ram: 128
+      accelerators: []
+      queues:
+        - { name: spr, node_count: 560 }
+    - label: 'Skylake (SKX) node'
+      description: null
+      node_count: 1060
+      cpu_type: '2x Intel Xeon Platinum 8160'
+      cpu_architecture: x86_64
+      cpu_count: 48
+      ram: 192
+      accelerators: []
+      queues:
+        - { name: skx, node_count: 1060 }
+        - { name: skx-dev, node_count: 1060 }
+  queues:
+    - name: nvdimm
+      purpose: 'Jobs that need more memory than any other Stampede3 node can offer; one node per job'
+      max_wall_minutes: 2880
+      charged_per: node
+      access: batch
+    - name: pvc
+      purpose: 'Workloads built for Intel GPUs; up to 4 nodes per job'
+      max_wall_minutes: 2880
+      charged_per: node
+      access: batch
+    - name: h100
+      purpose: 'CUDA and deep learning workloads on NVIDIA GPUs; up to 4 nodes per job'
+      max_wall_minutes: 2880
+      charged_per: node
+      access: batch
+    - name: icx
+      purpose: 'General-purpose CPU jobs that need more memory per core than the SPR nodes provide; up to 32 nodes per job'
+      max_wall_minutes: 2880
+      charged_per: node
+      access: batch
+    - name: spr
+      purpose: 'Memory-bandwidth-bound jobs that benefit from on-package high-bandwidth memory; up to 32 nodes per job'
+      max_wall_minutes: 2880
+      charged_per: node
+      access: batch
+    - name: skx
+      purpose: 'General-purpose CPU jobs, including the largest multi-node runs; up to 256 nodes per job'
+      max_wall_minutes: 2880
+      charged_per: node
+      access: batch
+    - name: skx-dev
+      purpose: 'Development and testing on Skylake nodes; short jobs only, up to 16 nodes and 2 hours'
+      max_wall_minutes: 120
+      charged_per: node
+      access: batch
+
+derecho.ncar.ucar.edu:
+  title: 'Derecho'
+  legacy_hash: c6f762785aaabe6a5eecc1186297b6dbbcf68797f551ee7c10517dce3663e6ff
+  notes: 'Flagged only for the "None" accelerator placeholder. The develop row listed 235 GB, the usable memory on its shared nodes, and no node count; it is the same CPU node, entered once at 256 GB. main and preempt are charged for all 128 cores of each node, develop only for the requested cores.'
+  node_types:
+    - label: 'CPU node'
+      description: null
+      node_count: 2488
+      cpu_type: '2x AMD EPYC 7763 "Milan"'
+      cpu_architecture: x86_64
+      cpu_count: 128
+      ram: 256
+      accelerators: []
+      queues:
+        - { name: develop, node_count: null }
+        - { name: main, node_count: 2488 }
+        - { name: preempt, node_count: 2488 }
+  queues:
+    - name: develop
+      purpose: 'Short interactive or batch development and debugging on shared CPU nodes; routes to the cpudev execution queue and allows up to 256 concurrent CPU cores per user'
+      max_wall_minutes: 360
+      charged_per: core
+      access: batch
+    - name: main
+      purpose: 'Production CPU jobs requiring one or more exclusive nodes; routes to the cpu execution queue'
+      max_wall_minutes: 720
+      charged_per: node
+      access: batch
+    - name: preempt
+      purpose: 'Interruptible CPU jobs that can tolerate preemption and loss of unsaved progress; runs on otherwise idle nodes and routes to the pcpu execution queue'
+      max_wall_minutes: 6000
+      charged_per: node
+      access: batch
+
+voyager.sdsc.access-ci.org:
+  title: 'Voyager'
+  legacy_hash: 9eafa358c20908587590c5388bb80b66758854766197c63c5455699652adf8ce
+  notes: 'Gaudi and Goya are Habana AI processors, not GPUs, so they are typed "other" and no longer satisfy a GPU search. The compute row listed 2 CPU cores, which looks like the socket count, so cores per node is left blank. Voyager schedules through Kubernetes, not a batch system, so access is blank; it has no published charging during its testbed phase.'
+  node_types:
+    - label: 'Gaudi training node'
+      description: null
+      node_count: 42
+      cpu_type: '2x Intel Xeon Gold 6336'
+      cpu_architecture: x86_64
+      cpu_count: null
+      ram: 512
+      accelerators:
+        - { type: other, model: 'Habana Gaudi', count: 8, memory: 32 }
+      queues:
+        - { name: gaudi, node_count: 42 }
+    - label: 'Goya inference node'
+      description: null
+      node_count: 2
+      cpu_type: '2x Intel Xeon Gold 6240'
+      cpu_architecture: x86_64
+      cpu_count: 40
+      ram: 384
+      accelerators:
+        - { type: other, model: 'Habana Goya', count: 8, memory: null }
+      queues:
+        - { name: goya, node_count: 2 }
+    - label: 'Compute node'
+      description: null
+      node_count: 36
+      cpu_type: '2x Intel x86'
+      cpu_architecture: x86_64
+      cpu_count: null
+      ram: 384
+      accelerators: []
+      queues:
+        - { name: compute, node_count: 36 }
+  queues:
+    - name: gaudi
+      purpose: 'Deep learning training on the Gaudi accelerators. Choose this for model training, from a single accelerator up to 42 nodes.'
+      max_wall_minutes: 2880
+      charged_per: null
+      access: null
+    - name: goya
+      purpose: 'Inference work on the first-generation Habana inference processors. Choose this for serving or evaluating a trained model rather than training one.'
+      max_wall_minutes: 2880
+      charged_per: null
+      access: null
+    - name: compute
+      purpose: 'Data preparation and post-processing that does not need an accelerator. Choose this for staging data, converting datasets and analysing results.'
+      max_wall_minutes: 2880
+      charged_per: null
+      access: null

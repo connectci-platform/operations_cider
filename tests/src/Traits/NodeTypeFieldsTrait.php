@@ -12,7 +12,7 @@ use Drupal\paragraphs\Entity\ParagraphsType;
  *
  * For kernel tests that need field_rp_queue_specs and field_rp_node_types with
  * their paragraph bundles. The test class must enable the node, field, text,
- * file, entity_reference_revisions and paragraphs modules and install the
+ * file, options, entity_reference_revisions and paragraphs modules and install the
  * node, paragraph and file entity schemas. Everything is created only when it
  * does not exist yet, so a test that already defines some of these fields can
  * call this safely.
@@ -28,7 +28,7 @@ trait NodeTypeFieldsTrait {
       NodeType::create(['type' => $resource, 'name' => 'Resource'])->save();
     }
 
-    foreach (['rp_queue_spec', 'rp_node_type', 'rp_node_gpu', 'rp_queue_node'] as $bundle) {
+    foreach (['rp_queue_spec', 'rp_node_type', 'rp_accelerator', 'rp_node_type_queue'] as $bundle) {
       if (!ParagraphsType::load($bundle)) {
         ParagraphsType::create(['id' => $bundle, 'label' => $bundle])->save();
       }
@@ -45,33 +45,58 @@ trait NodeTypeFieldsTrait {
     $this->ensureNodeTypeField('node', 'field_rp_queue_specs', $paragraphRef, [$resource => ['rp_queue_spec']]);
     $this->ensureNodeTypeField('node', 'field_rp_node_types', $paragraphRef, [$resource => ['rp_node_type']]);
 
+    $list = static fn (array $allowed) => [
+      'type' => 'list_string',
+      'settings' => ['allowed_values' => $allowed],
+    ];
+
     $fields = [
-      'field_rp_queue_name' => [$string, ['rp_queue_spec']],
+      'field_rp_queue_name' => [$string, ['rp_queue_spec', 'rp_node_type_queue']],
       'field_rp_queue_purpose' => [$string, ['rp_queue_spec']],
       'field_rp_max_wall_time' => [$int, ['rp_queue_spec']],
-      'field_rp_queue_nodes' => [
-        $paragraphRef,
+      'field_rp_charged_per' => [
+        $list(['core' => 'Core', 'gpu' => 'GPU', 'node' => 'Whole node']),
         ['rp_queue_spec'],
-        ['rp_queue_spec' => ['rp_queue_node']],
+      ],
+      'field_rp_queue_access' => [
+        $list(['batch' => 'Batch', 'interactive' => 'Interactive only', 'by_request' => 'By request']),
+        ['rp_queue_spec'],
       ],
       // Legacy hardware fields on the queue row, kept until the cleanup ticket.
-      'field_rp_node_count' => [$int, ['rp_queue_spec', 'rp_node_type', 'rp_queue_node']],
+      'field_rp_node_count' => [$int, ['rp_queue_spec', 'rp_node_type', 'rp_node_type_queue']],
       'field_rp_cpus' => [$string, ['rp_queue_spec', 'rp_node_type']],
       'field_rp_cpu_count' => [$int, ['rp_queue_spec', 'rp_node_type']],
-      'field_rp_gpus' => [$string, ['rp_queue_spec', 'rp_node_gpu']],
-      'field_rp_gpu_count' => [$int, ['rp_queue_spec', 'rp_node_gpu']],
-      'field_rp_gpu_vram' => [$int, ['rp_queue_spec', 'rp_node_gpu']],
-      'field_rp_vram' => [$int, ['rp_queue_spec', 'rp_node_type']],
+      'field_rp_gpus' => [$string, ['rp_queue_spec']],
+      'field_rp_gpu_count' => [$int, ['rp_queue_spec']],
+      'field_rp_gpu_vram' => [$int, ['rp_queue_spec']],
+      'field_rp_vram' => [$int, ['rp_queue_spec']],
       'field_rp_ram' => [$string, ['rp_queue_spec']],
-      // Node type and queue-node fields.
+      // Node type fields.
       'field_rp_node_type_label' => [$string, ['rp_node_type']],
       'field_rp_node_type_description' => [['type' => 'string_long'], ['rp_node_type']],
-      'field_rp_node_gpus' => [
+      'field_rp_cpu_architecture' => [
+        $list(['x86_64' => 'x86_64', 'arm' => 'Arm']),
+        ['rp_node_type'],
+      ],
+      'field_rp_node_ram' => [$int, ['rp_node_type']],
+      'field_rp_accelerators' => [
         $paragraphRef,
         ['rp_node_type'],
-        ['rp_node_type' => ['rp_node_gpu']],
+        ['rp_node_type' => ['rp_accelerator']],
       ],
-      'field_rp_queue_node_type' => [$string, ['rp_queue_node']],
+      'field_rp_node_type_queues' => [
+        $paragraphRef,
+        ['rp_node_type'],
+        ['rp_node_type' => ['rp_node_type_queue']],
+      ],
+      // Accelerator fields.
+      'field_rp_accelerator_type' => [
+        $list(['gpu' => 'GPU', 'fpga' => 'FPGA', 'vector_engine' => 'Vector engine', 'other' => 'Other']),
+        ['rp_accelerator'],
+      ],
+      'field_rp_accelerator_model' => [$string, ['rp_accelerator']],
+      'field_rp_accelerator_count' => [$int, ['rp_accelerator']],
+      'field_rp_accelerator_memory' => [$int, ['rp_accelerator']],
     ];
     foreach ($fields as $name => $spec) {
       $targets = [];

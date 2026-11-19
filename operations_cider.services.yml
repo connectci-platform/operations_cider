@@ -25,3 +25,6 @@ services:
     # email_factory is optional so the container compiles where symfony_mailer
     # is not enabled (kernel tests of unrelated services).
     arguments: ['@?email_factory', '@entity_type.manager', '@logger.factory', '@state', '@datetime.time', '@cache_tags.invalidator']
+  operations_cider.node_type_migration:
+    class: \Drupal\operations_cider\NodeTypeMigration
+    arguments: ['@entity_type.manager', '@extension.list.module']

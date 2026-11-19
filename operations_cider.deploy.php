@@ -8,7 +8,6 @@
  * and search index changes that arrive through config sync.
  */
 
-use Drupal\operations_cider\QueueSpecMigrator;
 use Drupal\search_api\Entity\Index;
 
 /**
@@ -29,195 +28,71 @@ function operations_cider_deploy_reindex_resource_display_name() {
 }
 
 /**
- * Split queue hardware into node types and queue node references (D8-3090).
+ * Moves resources from legacy queue hardware rows to node types (D8-3090).
  *
- * Each legacy rp_queue_spec row repeated its hardware. This groups the rows by
- * hardware into rp_node_type paragraphs (with nested rp_node_gpu paragraphs)
- * and keeps one rp_queue_spec per queue name, pointing at node types through
- * rp_queue_node rows. The old hardware fields are left untouched for the
- * cleanup ticket. Resources that already have node types are skipped, so the
- * update is safe to rerun.
+ * Each resource with legacy queue rows and no node types is curated (from
+ * migration/d3090_curated.yml, when the hash of its legacy rows still
+ * matches), migrated automatically (when QueueSpecMigrator raises no flags),
+ * or skipped and left on its legacy rows. See NodeTypeMigration.
  *
- * This is a deploy hook rather than a post-update because field_rp_node_types
- * and the new paragraph types arrive through config import, which drush
- * deploy runs after updatedb.
+ * This is a deploy hook rather than a post-update because the node type
+ * fields arrive through config import, which drush deploy runs after
+ * updatedb. It is safe to run twice: resources that already have node types
+ * are not candidates. If any resource fails, the hook finishes the others and
+ * then throws, so it is not recorded as run and the next deploy retries it.
+ *
+ * Run `drush operations_cider:d3090-plan` to preview what it will do.
  */
-function operations_cider_deploy_d3090_01_node_types(&$sandbox): string {
-  $nodeStorage = \Drupal::entityTypeManager()->getStorage('node');
+function operations_cider_deploy_d3090_01_node_types(array &$sandbox): string {
+  /** @var \Drupal\operations_cider\NodeTypeMigration $migration */
+  $migration = \Drupal::service('operations_cider.node_type_migration');
   $logger = \Drupal::logger('operations_cider');
 
-  $candidates = static function () use ($nodeStorage, &$sandbox) {
-    $query = $nodeStorage->getQuery()
-      ->accessCheck(FALSE)
-      ->condition('type', 'access_active_resources_from_cid')
-      ->exists('field_rp_queue_specs')
-      ->notExists('field_rp_node_types')
-      ->sort('nid');
-    // Leave out resources already handled without being migrated, or each
-    // pass would load the same ones again and the update would never finish.
-    $done = array_merge($sandbox['failed'] ?? [], $sandbox['skipped'] ?? []);
-    if ($done) {
-      $query->condition('nid', $done, 'NOT IN');
-    }
-    return $query;
-  };
-
-  if (!isset($sandbox['resources'])) {
-    $sandbox['resources'] = 0;
-    $sandbox['node_types'] = 0;
-    $sandbox['queues'] = 0;
+  if (!isset($sandbox['ids'])) {
+    // Snapshot the candidates once, so a resource that is skipped or fails
+    // is not loaded again on every pass.
+    $sandbox['ids'] = $migration->candidateIds();
+    $sandbox['total'] = count($sandbox['ids']);
+    $sandbox['counts'] = ['curated' => 0, 'automatic' => 0, 'skipped' => 0];
     $sandbox['failed'] = [];
-    $sandbox['skipped'] = [];
-    $sandbox['total'] = (int) $candidates()->count()->execute();
   }
 
-  $nids = $candidates()->range(0, 10)->execute();
-  $migrator = new QueueSpecMigrator();
-  $paragraphStorage = \Drupal::entityTypeManager()->getStorage('paragraph');
-
-  foreach ($nodeStorage->loadMultiple($nids) as $node) {
+  $batch = array_splice($sandbox['ids'], 0, 10);
+  $nodes = \Drupal::entityTypeManager()->getStorage('node')->loadMultiple($batch);
+  foreach ($nodes as $node) {
+    $context = ['@title' => $node->label(), '@nid' => $node->id()];
     try {
-      // Re-check: an earlier pass or another process may have migrated it.
-      if (!$node->get('field_rp_node_types')->isEmpty()) {
-        $sandbox['skipped'][] = $node->id();
+      $plan = $migration->plan($node);
+      if ($plan['action'] === 'skipped') {
+        $sandbox['counts']['skipped']++;
+        $logger->warning('D8-3090 skipped @title (nid @nid): @reasons', $context + ['@reasons' => implode(' ', $plan['reasons'])]);
         continue;
       }
-
-      $paragraphs = [];
-      $rows = [];
-      foreach ($node->get('field_rp_queue_specs')->referencedEntities() as $paragraph) {
-        $paragraphs[] = $paragraph;
-        $rows[] = _operations_cider_d3090_legacy_row($paragraph);
-      }
-      if (!$rows) {
-        // The queue references no longer load (deleted paragraphs), so there
-        // is nothing to migrate.
-        $sandbox['skipped'][] = $node->id();
-        $logger->warning('Node types migration skipped @title (nid @nid): its queue rows no longer load.', [
-          '@title' => $node->label(),
-          '@nid' => $node->id(),
-        ]);
-        continue;
-      }
-      $result = $migrator->migrate($rows);
-
-      // Build everything before touching the node so a failure leaves it as is.
-      $nodeTypes = [];
-      foreach ($result['node_types'] as $type) {
-        $gpus = [];
-        foreach ($type['gpus'] as $gpu) {
-          $gpus[] = $paragraphStorage->create([
-            'type' => 'rp_node_gpu',
-            'field_rp_gpus' => $gpu['type'],
-            'field_rp_gpu_count' => $gpu['count'],
-            'field_rp_gpu_vram' => $gpu['vram'],
-          ]);
-        }
-        $nodeTypes[] = $paragraphStorage->create([
-          'type' => 'rp_node_type',
-          'field_rp_node_type_label' => $type['label'],
-          'field_rp_node_type_description' => $type['description'],
-          'field_rp_node_count' => $type['node_count'],
-          'field_rp_cpus' => $type['cpu_type'],
-          'field_rp_cpu_count' => $type['cpu_count'],
-          'field_rp_vram' => $type['ram'],
-          'field_rp_node_gpus' => $gpus,
-        ]);
-      }
-
-      // Reuse the first existing paragraph of each queue name; the other rows
-      // of that queue are dropped from the field (not deleted).
-      $firstByName = [];
-      foreach ($paragraphs as $paragraph) {
-        $name = trim((string) $paragraph->get('field_rp_queue_name')->value);
-        $firstByName[$name] ??= $paragraph;
-      }
-      $queueParagraphs = [];
-      foreach ($result['queues'] as $queue) {
-        $queueNodes = [];
-        foreach ($queue['nodes'] as $entry) {
-          $queueNodes[] = $paragraphStorage->create([
-            'type' => 'rp_queue_node',
-            'field_rp_queue_node_type' => $entry['node_type'],
-            'field_rp_node_count' => $entry['node_count'],
-          ]);
-        }
-        $paragraph = $firstByName[$queue['name']];
-        $paragraph->set('field_rp_queue_purpose', $queue['purpose']);
-        $paragraph->set('field_rp_max_wall_time', $queue['max_wall_minutes']);
-        $paragraph->set('field_rp_queue_nodes', $queueNodes);
-        $paragraph->setNewRevision(TRUE);
-        $queueParagraphs[] = $paragraph;
-      }
-
-      $node->set('field_rp_node_types', $nodeTypes);
-      $node->set('field_rp_queue_specs', $queueParagraphs);
-      $node->setNewRevision(TRUE);
-      $node->setRevisionLogMessage('Split queue hardware into node types (D8-3090)');
-      $node->save();
-
-      foreach ($result['report'] as $line) {
-        $logger->notice('@title: @line', ['@title' => $node->label(), '@line' => $line]);
-      }
-      $sandbox['resources']++;
-      $sandbox['node_types'] += count($nodeTypes);
-      $sandbox['queues'] += count($queueParagraphs);
-    }
-    catch (\Throwable $e) {
-      $sandbox['failed'][] = $node->id();
-      $logger->error('Node types migration failed for @title (nid @nid): @message', [
-        '@title' => $node->label(),
-        '@nid' => $node->id(),
-        '@message' => $e->getMessage(),
+      $migration->apply($node, $plan['result'], $plan['action']);
+      $sandbox['counts'][$plan['action']]++;
+      $logger->notice('D8-3090 @action @title (nid @nid).@report', $context + [
+        '@action' => $plan['action'],
+        '@report' => $plan['reasons'] ? ' ' . implode(' ', $plan['reasons']) : '',
       ]);
     }
+    catch (\Throwable $e) {
+      $sandbox['failed'][] = sprintf('%s (nid %s): %s', $node->label(), $node->id(), $e->getMessage());
+      $logger->error('D8-3090 failed for @title (nid @nid): @message', $context + ['@message' => $e->getMessage()]);
+    }
   }
 
-  $remaining = (int) $candidates()->count()->execute();
-  $sandbox['#finished'] = $remaining === 0 ? 1 : 1 - ($remaining / max($sandbox['total'], 1));
-  if ($remaining > 0 && $sandbox['#finished'] >= 1) {
-    $sandbox['#finished'] = 0.99;
-  }
+  $sandbox['#finished'] = $sandbox['ids'] ? 1 - count($sandbox['ids']) / max($sandbox['total'], 1) : 1;
 
-  return sprintf(
-    'Migrated %d resources into %d node types and %d queues (%d failed, %d skipped; see the operations_cider log for the report).',
-    $sandbox['resources'],
-    $sandbox['node_types'],
-    $sandbox['queues'],
+  $summary = sprintf(
+    'Node types: %d curated, %d automatic, %d skipped, %d failed of %d resources. See the operations_cider log for the per-resource report.',
+    $sandbox['counts']['curated'],
+    $sandbox['counts']['automatic'],
+    $sandbox['counts']['skipped'],
     count($sandbox['failed']),
-    count($sandbox['skipped'])
+    $sandbox['total']
   );
-}
-
-/**
- * Reads a legacy rp_queue_spec paragraph into the QueueSpecMigrator row shape.
- *
- * @param \Drupal\paragraphs\ParagraphInterface $paragraph
- *   The queue row.
- *
- * @return array<string, mixed>
- *   Row keyed like the API; empty values are NULL and numbers are integers.
- */
-function _operations_cider_d3090_legacy_row($paragraph): array {
-  $text = static function (string $field) use ($paragraph): ?string {
-    $value = $paragraph->get($field)->value;
-    return $value === NULL || trim((string) $value) === '' ? NULL : (string) $value;
-  };
-  $int = static function (string $field) use ($paragraph): ?int {
-    $value = $paragraph->get($field)->value;
-    return $value === NULL || $value === '' ? NULL : (int) $value;
-  };
-  return [
-    'name' => (string) $paragraph->get('field_rp_queue_name')->value,
-    'purpose' => $text('field_rp_queue_purpose'),
-    'node_count' => $int('field_rp_node_count'),
-    'cpu_type' => $text('field_rp_cpus'),
-    'cpu_count' => $int('field_rp_cpu_count'),
-    'gpu_type' => $text('field_rp_gpus'),
-    'gpu_count' => $int('field_rp_gpu_count'),
-    'gpu_vram' => $int('field_rp_gpu_vram'),
-    'ram' => $int('field_rp_vram'),
-    'legacy_ram' => $text('field_rp_ram'),
-    'max_wall_minutes' => $int('field_rp_max_wall_time'),
-  ];
+  if ($sandbox['#finished'] >= 1 && $sandbox['failed']) {
+    throw new \RuntimeException($summary . ' Failed: ' . implode('; ', $sandbox['failed']));
+  }
+  return $summary;
 }

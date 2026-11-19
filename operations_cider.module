@@ -12,6 +12,20 @@ use Drupal\operations_cider\NodeTypeReferences;
 use Drupal\paragraphs\ParagraphInterface;
 
 /**
+ * Legacy hardware fields on rp_queue_spec, removed in the D8-3090 follow-up.
+ */
+const OPERATIONS_CIDER_LEGACY_QUEUE_HARDWARE_FIELDS = [
+  'field_rp_node_count',
+  'field_rp_cpus',
+  'field_rp_cpu_count',
+  'field_rp_vram',
+  'field_rp_ram',
+  'field_rp_gpus',
+  'field_rp_gpu_count',
+  'field_rp_gpu_vram',
+];
+
+/**
  * Implements hook_node_insert().
  *
  * Send CiDeR resources to all affiliated sites if using the domain_access module.
@@ -37,10 +51,10 @@ function operations_cider_form_node_access_active_resources_from_cid_form_alter(
 }
 
 /**
- * Form validate handler: queues must reference existing node type labels.
+ * Form validate handler: unique labels and queue names, valid queue references.
  *
- * Reads the raw submitted paragraph subform values so that renaming a node
- * type and fixing the queue references succeed in one submit.
+ * Reads the raw submitted paragraph subform values so that renaming a queue
+ * and fixing the node types that list it succeed in one submit.
  */
 function operations_cider_validate_node_type_references(array &$form, FormStateInterface $form_state): void {
   // Paragraphs add/remove/edit-mode buttons set #limit_validation_errors, so
@@ -53,37 +67,62 @@ function operations_cider_validate_node_type_references(array &$form, FormStateI
     return;
   }
 
-  $labels = [];
-  foreach (operations_cider_paragraph_items($form_state, [], 'field_rp_node_types') as $item) {
-    $labels[] = operations_cider_paragraph_item_value($item, 'field_rp_node_type_label');
+  $queue_names = [];
+  foreach (operations_cider_paragraph_items($form_state, [], 'field_rp_queue_specs') as $item) {
+    $queue_names[] = operations_cider_paragraph_item_value($item, 'field_rp_queue_name');
   }
 
-  $queues = [];
-  foreach (operations_cider_paragraph_items($form_state, [], 'field_rp_queue_specs') as $delta => $item) {
-    $node_types = [];
+  $labels = [];
+  $node_type_queues = [];
+  foreach (operations_cider_paragraph_items($form_state, [], 'field_rp_node_types') as $delta => $item) {
+    $label = operations_cider_paragraph_item_value($item, 'field_rp_node_type_label');
+    $labels[] = $label;
+    $listed = [];
     if (isset($item['subform'])) {
-      // Expanded queue: its node rows are a nested widget of their own.
-      $nested_parents = ['field_rp_queue_specs', $delta, 'subform'];
-      foreach (operations_cider_paragraph_items($form_state, $nested_parents, 'field_rp_queue_nodes', $item['subform']['field_rp_queue_nodes'] ?? NULL) as $node_item) {
-        $node_types[] = operations_cider_paragraph_item_value($node_item, 'field_rp_queue_node_type');
+      // Expanded node type: its queue rows are a nested widget of their own.
+      $nested_parents = ['field_rp_node_types', $delta, 'subform'];
+      foreach (operations_cider_paragraph_items($form_state, $nested_parents, 'field_rp_node_type_queues', $item['subform']['field_rp_node_type_queues'] ?? NULL) as $queue_item) {
+        $listed[] = operations_cider_paragraph_item_value($queue_item, 'field_rp_queue_name');
       }
     }
-    elseif (isset($item['entity']) && $item['entity']->hasField('field_rp_queue_nodes')) {
-      // Collapsed queue: read the node rows from the paragraph entity.
-      foreach ($item['entity']->get('field_rp_queue_nodes') as $field_item) {
+    elseif (isset($item['entity']) && $item['entity']->hasField('field_rp_node_type_queues')) {
+      // Collapsed node type: read the queue rows from the paragraph entity.
+      foreach ($item['entity']->get('field_rp_node_type_queues') as $field_item) {
         if ($field_item->entity instanceof ParagraphInterface) {
-          $node_types[] = operations_cider_paragraph_item_value(['entity' => $field_item->entity], 'field_rp_queue_node_type');
+          $listed[] = operations_cider_paragraph_item_value(['entity' => $field_item->entity], 'field_rp_queue_name');
         }
       }
     }
-    $queues[] = [
-      'name' => operations_cider_paragraph_item_value($item, 'field_rp_queue_name'),
-      'node_types' => $node_types,
-    ];
+    $node_type_queues[] = ['label' => $label, 'queues' => $listed];
   }
 
-  foreach (NodeTypeReferences::errors($labels, $queues) as $message) {
-    $form_state->setErrorByName('field_rp_queue_specs', t('@message', ['@message' => $message]));
+  foreach (NodeTypeReferences::errors($labels, $queue_names, $node_type_queues) as $message) {
+    $field = str_starts_with($message, 'Queue name') ? 'field_rp_queue_specs' : 'field_rp_node_types';
+    $form_state->setErrorByName($field, t('@message', ['@message' => $message]));
+  }
+}
+
+/**
+ * Implements hook_field_widget_single_element_form_alter().
+ *
+ * Queue rows keep their legacy hardware fields until the D8-3090 follow-up
+ * removes them. A resource the migration skipped still renders its hardware
+ * from those fields, so they stay editable there; once a resource has node
+ * types they are hidden, since nothing reads them any more.
+ */
+function operations_cider_field_widget_single_element_form_alter(array &$element, FormStateInterface $form_state, array $context): void {
+  $items = $context['items'];
+  if ($items->getName() !== 'field_rp_queue_specs' || !isset($element['subform'])) {
+    return;
+  }
+  $host = $items->getEntity();
+  if (!$host->hasField('field_rp_node_types') || $host->get('field_rp_node_types')->isEmpty()) {
+    return;
+  }
+  foreach (OPERATIONS_CIDER_LEGACY_QUEUE_HARDWARE_FIELDS as $field_name) {
+    if (isset($element['subform'][$field_name])) {
+      $element['subform'][$field_name]['#access'] = FALSE;
+    }
   }
 }
 

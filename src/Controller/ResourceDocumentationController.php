@@ -298,7 +298,7 @@ class ResourceDocumentationController extends ControllerBase {
     // them when the resource has node types, read from the old queue hardware
     // fields otherwise (before the migration has run for that resource).
     $nodeTypes = $this->getNodeTypeData($node);
-    $queueRows = $this->getQueueRows($node);
+    $queueRows = $this->attachQueueNodes($this->getQueueRows($node), $nodeTypes);
 
     $data = [
       'nid' => (int) $node->id(),
@@ -334,7 +334,10 @@ class ResourceDocumentationController extends ControllerBase {
       'queue_specs' => $nodeTypes
         ? $this->deriveQueueSpecs($queueRows, $nodeTypes)
         : $this->getParagraphData($node, 'field_rp_queue_specs', self::QUEUE_SPEC_MAP),
-      'node_types' => $nodeTypes,
+      'node_types' => array_map(function (array $nodeType): array {
+        unset($nodeType['queue_entries']);
+        return $nodeType;
+      }, $nodeTypes),
       'queues' => $this->buildQueues($queueRows),
       'datasets' => $this->getParagraphData($node, 'field_rp_datasets', self::DATASET_MAP),
     ];
@@ -860,7 +863,11 @@ class ResourceDocumentationController extends ControllerBase {
   }
 
   /**
-   * Read the resource's node types, each with its GPU list.
+   * Read the resource's node types, each with its accelerator list.
+   *
+   * Each entry also carries `queue_entries`, the queues the node type serves
+   * (name and node count). That key is internal: it feeds the derived
+   * `queues[].nodes` and `queue_specs` and is removed from the payload.
    *
    * @return list<array<string, mixed>>
    *   Node types in editor order; empty when the resource has none.
@@ -873,44 +880,70 @@ class ResourceDocumentationController extends ControllerBase {
         'field_rp_node_type_description' => 'description',
         'field_rp_node_count' => 'node_count',
         'field_rp_cpus' => 'cpu_type',
+        'field_rp_cpu_architecture' => 'cpu_architecture',
         'field_rp_cpu_count' => 'cpu_count',
-        'field_rp_vram' => 'ram',
+        'field_rp_node_ram' => 'ram',
       ]);
-      $gpus = [];
-      foreach ($this->loadParagraphs($paragraph, 'field_rp_node_gpus') as $gpuParagraph) {
-        $gpu = $this->paragraphRow($gpuParagraph, [
-          'field_rp_gpus' => 'type',
-          'field_rp_gpu_count' => 'count',
-          'field_rp_gpu_vram' => 'vram',
+      $accelerators = [];
+      foreach ($this->loadParagraphs($paragraph, 'field_rp_accelerators') as $acceleratorParagraph) {
+        $accelerator = $this->paragraphRow($acceleratorParagraph, [
+          'field_rp_accelerator_type' => 'type',
+          'field_rp_accelerator_model' => 'model',
+          'field_rp_accelerator_count' => 'count',
+          'field_rp_accelerator_memory' => 'memory',
         ]);
-        if ($this->rowHasValue($gpu)) {
-          $gpus[] = $gpu;
+        // The type has a default, so an untouched paragraph still has one.
+        if ($this->rowHasValue(array_diff_key($accelerator, ['type' => 1]))) {
+          $accelerators[] = [
+            'type' => $accelerator['type'] ?? 'gpu',
+            'model' => $this->trimmedOrNull($accelerator['model'] ?? NULL),
+            'count' => $accelerator['count'] ?? NULL,
+            'memory' => $accelerator['memory'] ?? NULL,
+          ];
         }
       }
-      $row['gpus'] = $gpus;
-      if (!$this->rowHasValue(array_diff_key($row, ['gpus' => 1])) && !$gpus) {
+      $queueEntries = [];
+      foreach ($this->loadParagraphs($paragraph, 'field_rp_node_type_queues') as $queueParagraph) {
+        $entry = $this->paragraphRow($queueParagraph, [
+          'field_rp_queue_name' => 'name',
+          'field_rp_node_count' => 'node_count',
+        ]);
+        if ($this->rowHasValue($entry)) {
+          $queueEntries[] = [
+            'name' => $this->trimmedOrNull($entry['name'] ?? NULL),
+            'node_count' => $entry['node_count'] ?? NULL,
+          ];
+        }
+      }
+      // The label is required on the form and in the OpenAPI, and queues
+      // render node types by it, so a node type without one is left out.
+      $label = $this->trimmedOrNull($row['label'] ?? NULL);
+      if ($label === NULL) {
         continue;
       }
       $nodeTypes[] = [
-        'label' => $this->trimmedOrNull($row['label'] ?? NULL),
+        'label' => $label,
         'description' => $row['description'] ?? NULL,
         'node_count' => $row['node_count'] ?? NULL,
         'cpu_type' => $row['cpu_type'] ?? NULL,
+        'cpu_architecture' => ($row['cpu_architecture'] ?? NULL) ?: NULL,
         'cpu_count' => $row['cpu_count'] ?? NULL,
         'ram' => $row['ram'] ?? NULL,
-        'gpus' => $gpus,
+        'accelerators' => $accelerators,
+        'queue_entries' => $queueEntries,
       ];
     }
     return $nodeTypes;
   }
 
   /**
-   * Read the queue paragraphs with the node types each one points at.
+   * Read the queue paragraphs.
    *
    * Internal shape: the wall time stays in minutes so deriveQueueSpecs() can
-   * hand rows to the same wall-time normalizer the legacy rows use.
+   * hand rows to the same wall-time normalizer the legacy rows use. `nodes`
+   * is filled in by attachQueueNodes() from the node types.
    *
-   * @return list<array{name: mixed, purpose: mixed, max_wall_time_minutes: mixed, nodes: list<array{node_type: ?string, node_count: ?int}>}>
+   * @return list<array<string, mixed>>
    *   Queues in editor order.
    */
   private function getQueueRows($node): array {
@@ -920,27 +953,54 @@ class ResourceDocumentationController extends ControllerBase {
         'field_rp_queue_name' => 'name',
         'field_rp_queue_purpose' => 'purpose',
         'field_rp_max_wall_time' => 'max_wall_time_minutes',
+        'field_rp_charged_per' => 'charged_per',
+        'field_rp_queue_access' => 'access',
       ]);
-      $nodes = [];
-      foreach ($this->loadParagraphs($paragraph, 'field_rp_queue_nodes') as $nodeParagraph) {
-        $entry = $this->paragraphRow($nodeParagraph, [
-          'field_rp_queue_node_type' => 'node_type',
-          'field_rp_node_count' => 'node_count',
-        ]);
-        if ($this->rowHasValue($entry)) {
-          $nodes[] = [
-            'node_type' => $this->trimmedOrNull($entry['node_type'] ?? NULL),
-            'node_count' => $entry['node_count'] ?? NULL,
-          ];
-        }
-      }
-      if (!$this->rowHasValue($row) && !$nodes) {
+      if (!$this->rowHasValue($row)) {
         continue;
       }
-      $row['nodes'] = $nodes;
+      $row['charged_per'] = ($row['charged_per'] ?? NULL) ?: NULL;
+      $row['access'] = ($row['access'] ?? NULL) ?: NULL;
+      $row['nodes'] = [];
       $queues[] = $row;
     }
     return $queues;
+  }
+
+  /**
+   * Fill each queue's `nodes` from the node types that list it.
+   *
+   * Queue names are matched after trimming. Entries follow node type order,
+   * each with its own node count.
+   *
+   * @param list<array<string, mixed>> $queueRows
+   *   Rows from getQueueRows().
+   * @param list<array<string, mixed>> $nodeTypes
+   *   Node types from getNodeTypeData().
+   *
+   * @return list<array<string, mixed>>
+   *   The queue rows with `nodes` set to a list of node_type and node_count.
+   */
+  private function attachQueueNodes(array $queueRows, array $nodeTypes): array {
+    foreach ($queueRows as &$queue) {
+      $name = $this->trimmedOrNull($queue['name'] ?? NULL);
+      $queue['nodes'] = [];
+      if ($name === NULL) {
+        continue;
+      }
+      foreach ($nodeTypes as $nodeType) {
+        foreach ($nodeType['queue_entries'] as $entry) {
+          if ($entry['name'] === $name) {
+            $queue['nodes'][] = [
+              'node_type' => $nodeType['label'],
+              'node_count' => $entry['node_count'],
+            ];
+          }
+        }
+      }
+    }
+    unset($queue);
+    return $queueRows;
   }
 
   /**
@@ -970,6 +1030,8 @@ class ResourceDocumentationController extends ControllerBase {
         'purpose' => $row['purpose'] ?? NULL,
         'max_wall_time_hours' => $minutes === NULL ? NULL : $minutes / 60,
         'max_wall_time_display' => $this->wallTimeDisplay($minutes),
+        'charged_per' => $row['charged_per'] ?? NULL,
+        'access' => $row['access'] ?? NULL,
         'nodes' => $row['nodes'],
       ];
     }
@@ -980,43 +1042,53 @@ class ResourceDocumentationController extends ControllerBase {
    * Derive legacy per-row queue_specs from node types and queues.
    *
    * One row per queue-and-node-type entry, in the keys the old rows had; the
-   * wall time and summary are added by the caller's shared loops. A queue with
-   * no node types gives one row with null hardware.
+   * wall time and summary are added by the caller's shared loops. A queue no
+   * node type lists gives one row with null hardware. The GPU columns come
+   * from GPU accelerators only, and the purpose is the queue's own.
+   *
+   * @param list<array<string, mixed>> $queueRows
+   *   Rows from attachQueueNodes().
+   * @param list<array<string, mixed>> $nodeTypes
+   *   Node types from getNodeTypeData().
    *
    * @return list<array<string, mixed>>
    *   Rows in the legacy shape.
    */
   private function deriveQueueSpecs(array $queueRows, array $nodeTypes): array {
-    $byLabel = [];
-    foreach ($nodeTypes as $nodeType) {
-      if ($nodeType['label'] !== NULL && !isset($byLabel[$nodeType['label']])) {
-        $byLabel[$nodeType['label']] = $nodeType;
-      }
-    }
-
     $rows = [];
     foreach ($queueRows as $queue) {
-      $entries = $queue['nodes'] ?: [['node_type' => NULL, 'node_count' => NULL]];
-      foreach ($entries as $entry) {
-        $nodeType = $entry['node_type'] !== NULL ? ($byLabel[$entry['node_type']] ?? NULL) : NULL;
-        $gpus = $nodeType['gpus'] ?? [];
-        $types = array_values(array_filter(array_map(fn($g) => $g['type'] ?? NULL, $gpus), fn($t) => $t !== NULL && $t !== ''));
-        $counts = array_filter(array_map(fn($g) => $g['count'] ?? NULL, $gpus), fn($c) => $c !== NULL);
-        $purpose = $queue['purpose'] ?? NULL;
-        if ($purpose === NULL || $purpose === '') {
-          $purpose = $nodeType['description'] ?? NULL;
+      $name = $this->trimmedOrNull($queue['name'] ?? NULL);
+      $matches = [];
+      if ($name !== NULL) {
+        foreach ($nodeTypes as $nodeType) {
+          foreach ($nodeType['queue_entries'] as $entry) {
+            if ($entry['name'] === $name) {
+              $matches[] = [$nodeType, $entry['node_count']];
+            }
+          }
         }
+      }
+      if (!$matches) {
+        $matches[] = [NULL, NULL];
+      }
+      foreach ($matches as [$nodeType, $nodeCount]) {
+        $gpus = array_values(array_filter(
+          $nodeType['accelerators'] ?? [],
+          fn($a) => ($a['type'] ?? NULL) === 'gpu',
+        ));
+        $types = array_values(array_filter(array_map(fn($g) => $g['model'] ?? NULL, $gpus), fn($t) => $t !== NULL && $t !== ''));
+        $counts = array_filter(array_map(fn($g) => $g['count'] ?? NULL, $gpus), fn($c) => $c !== NULL);
         $rows[] = [
           'name' => $queue['name'] ?? NULL,
-          'purpose' => $purpose,
-          'node_count' => $entry['node_count'],
+          'purpose' => $queue['purpose'] ?? NULL,
+          'node_count' => $nodeCount,
           'cpu_count' => $nodeType['cpu_count'] ?? NULL,
           'cpu_type' => $nodeType['cpu_type'] ?? NULL,
           // Several GPU models on one node: join the models, sum the counts
           // that are known, and drop the vRAM, which can differ per model.
           'gpu_count' => $counts ? array_sum($counts) : NULL,
           'gpu_type' => $types ? implode(', ', $types) : NULL,
-          'gpu_vram' => count($gpus) === 1 ? ($gpus[0]['vram'] ?? NULL) : NULL,
+          'gpu_vram' => count($gpus) === 1 ? ($gpus[0]['memory'] ?? NULL) : NULL,
           'ram' => $nodeType['ram'] ?? NULL,
           'max_wall_time_minutes' => $queue['max_wall_time_minutes'] ?? NULL,
         ];
@@ -1088,26 +1160,51 @@ class ResourceDocumentationController extends ControllerBase {
   /**
    * Build a one-line hardware summary of a node type.
    *
-   * Lists every GPU model, e.g. "4× AMD MI100 (32 GB vRAM), 4× AMD MI210,
-   * 64-core AMD EPYC 7763, 256 GB RAM". The node count is left out: it is
-   * how many nodes of this type exist, not part of the hardware.
+   * Lists every accelerator, e.g. "4× AMD MI100 (32 GB vRAM), 2× Bittware
+   * IA-840F (FPGA, 64 GB memory), 64-core AMD EPYC 7763 (Arm), 256 GB RAM".
+   * The node count is left out: it is how many nodes of this type exist, not
+   * part of the hardware.
    */
   private function buildNodeTypeSummary(array $nodeType): ?string {
     $parts = [];
-    foreach ($nodeType['gpus'] as $gpu) {
+    $typeNames = [
+      'fpga' => 'FPGA',
+      'vector_engine' => 'vector engine',
+      'other' => 'accelerator',
+    ];
+    foreach ($nodeType['accelerators'] as $accelerator) {
+      $isGpu = ($accelerator['type'] ?? 'gpu') === 'gpu';
       $text = '';
-      if (!empty($gpu['count'])) {
-        $text = $gpu['count'] . '×';
+      if (!empty($accelerator['count'])) {
+        $text = $accelerator['count'] . '×';
       }
-      if (!empty($gpu['type'])) {
-        $text = $text === '' ? $gpu['type'] : $text . ' ' . $gpu['type'];
+      if (!empty($accelerator['model'])) {
+        $text = $text === '' ? $accelerator['model'] : $text . ' ' . $accelerator['model'];
       }
-      if (!empty($gpu['vram'])) {
-        $text .= ' (' . $gpu['vram'] . ' GB vRAM)';
+      elseif (!$isGpu) {
+        $text = trim($text . ' ' . ($typeNames[$accelerator['type']] ?? 'accelerator'));
+      }
+      elseif ($text !== '') {
+        $text .= ' GPU';
+      }
+      $details = [];
+      if (!$isGpu && !empty($accelerator['model'])) {
+        $details[] = ($typeNames[$accelerator['type']] ?? 'accelerator');
+      }
+      if (!empty($accelerator['memory'])) {
+        $details[] = $accelerator['memory'] . ' GB ' . ($isGpu ? 'vRAM' : 'memory');
+      }
+      if ($details) {
+        $text = trim($text . ' (' . implode(', ', $details) . ')');
       }
       if (trim($text) !== '') {
         $parts[] = trim($text);
       }
+    }
+    // Mark Arm CPUs; x86_64 is the unremarkable default and stays unstated.
+    // Skip the suffix when the CPU text already says Arm ("NVIDIA Grace ARM").
+    if (($nodeType['cpu_architecture'] ?? NULL) === 'arm' && !preg_match('/\barm\b/i', (string) ($nodeType['cpu_type'] ?? ''))) {
+      $nodeType['cpu_type'] = !empty($nodeType['cpu_type']) ? $nodeType['cpu_type'] . ' (Arm)' : 'Arm CPU';
     }
     $parts = array_merge($parts, $this->cpuRamSummaryParts($nodeType));
     return $parts ? implode(', ', $parts) : NULL;
@@ -1131,7 +1228,6 @@ class ResourceDocumentationController extends ControllerBase {
       $parts[] = $hardware['cpu_count'] . '-core';
     }
 
-    // field_rp_vram holds node RAM (GB), despite its legacy field name.
     if (isset($hardware['ram']) && $hardware['ram'] !== NULL && $hardware['ram'] !== '') {
       $parts[] = $this->formatGbSize((int) $hardware['ram']) . ' RAM';
     }

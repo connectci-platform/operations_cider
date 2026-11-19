@@ -7,16 +7,18 @@ namespace Drupal\operations_cider;
  *
  * Each legacy row repeated its hardware, so a resource with five queues on the
  * same nodes entered the same CPU and GPU five times. This groups the rows by
- * hardware into node types (entered once) and by queue name into queues that
- * point at node types with a per-queue node count. It is pure PHP so the rules
- * can be unit tested against real rows; the deploy hook applies the result.
+ * hardware into node types (entered once), each listing the queues it serves
+ * with a per-queue node count, and by queue name into queues. It is pure PHP so
+ * the rules can be unit tested against real rows; the deploy hook applies the
+ * result. Resources where merging is not safe are reported by flags() and are
+ * not merged automatically.
  */
 final class QueueSpecMigrator {
 
   /**
    * GPU type text that means "no accelerator described".
    */
-  private const PLACEHOLDERS = ['none', 'n/a', 'na', '-'];
+  private const PLACEHOLDERS = ['none', 'n/a', 'na', '-', '0'];
 
   /**
    * Migrates legacy rows.
@@ -42,10 +44,7 @@ final class QueueSpecMigrator {
       $queueKey = 'q:' . $row['name'];
       $queueGroups[$queueKey]['name'] = $row['name'];
 
-      $tuple = [
-        $row['cpu_type'], $row['cpu_count'], $row['ram'],
-        $row['gpu_type'], $row['gpu_count'], $row['gpu_vram'],
-      ];
+      $tuple = $this->tuple($row);
       $allBlank = count(array_filter($tuple, static fn ($v) => $v !== NULL)) === 0;
 
       if ($allBlank) {
@@ -65,7 +64,15 @@ final class QueueSpecMigrator {
         }
       }
       $row['label'] = $nodeTypes[$index]['label'];
-      $row['type_index'] = $index;
+      if ($row['name'] === '') {
+        // Hardware with no queue (Anvil Notebook has no scheduler): a node
+        // type that serves no queue, with the row's count as its total.
+        unset($queueGroups[$queueKey]);
+        $nodeTypes[$index]['node_count'] ??= $row['node_count'];
+        $report[] = sprintf('A row has no queue name; its hardware became node type "%s", which serves no queue.', $row['label']);
+        continue;
+      }
+      $nodeTypes[$index]['queues'][] = ['name' => $row['name'], 'node_count' => $row['node_count']];
       $queueGroups[$queueKey]['rows'][] = $row;
 
       if ($row['ram'] === NULL && $row['legacy_ram'] !== NULL) {
@@ -75,9 +82,8 @@ final class QueueSpecMigrator {
 
     $queues = [];
     foreach (array_values($queueGroups) as $group) {
-      $queues[] = $this->buildQueue($group['name'], $group['rows'], $nodeTypes, $report);
+      $queues[] = $this->buildQueue($group['name'], $group['rows'], $report);
     }
-    $this->reportSharedCpuOnlyTypes($nodeTypes, $queues, $report);
 
     return [
       'node_types' => array_values($nodeTypes),
@@ -87,94 +93,147 @@ final class QueueSpecMigrator {
   }
 
   /**
-   * Flags no-GPU node types that several queues share on an accelerator system.
+   * Lists the reasons a resource must not be merged automatically.
    *
-   * On a resource that also has accelerators, queues without a GPU model often
-   * run on hardware the GPU fields could not describe (ACES bittware, memverge),
-   * so identical CPU fields may hide different nodes. Merging is still the
-   * right default, as on Delta CPU; this asks a person to check.
+   * @param array<int, array<string, mixed>> $rows
+   *   Legacy rows, as for migrate().
    *
-   * @param array<int, array<string, mixed>> $nodeTypes
-   *   The node types.
-   * @param array<int, array<string, mixed>> $queues
-   *   The queues.
-   * @param string[] $report
-   *   Report lines, appended to.
+   * @return list<string>
+   *   Human-readable reasons; empty when the rows are safe to merge.
    */
-  private function reportSharedCpuOnlyTypes(array $nodeTypes, array $queues, array &$report): void {
-    $hasAccelerator = (bool) array_filter($nodeTypes, static fn ($type) => $type['gpus'] !== []);
-    if (!$hasAccelerator) {
-      return;
+  public function flags(array $rows): array {
+    $flags = [];
+    $normalized = [];
+    foreach (array_values($rows) as $raw) {
+      $normalized[] = $this->normalizeRow($raw);
     }
-    foreach ($nodeTypes as $type) {
-      if ($type['gpus'] !== []) {
+
+    // (a) Placeholder accelerator values.
+    $seen = [];
+    foreach ($normalized as $row) {
+      if ($row['gpu_placeholder'] !== NULL && !isset($seen[$row['name'] . "\0" . $row['gpu_placeholder']])) {
+        $seen[$row['name'] . "\0" . $row['gpu_placeholder']] = TRUE;
+        $flags[] = sprintf('Queue "%s" has the placeholder accelerator value "%s".', $row['name'], $row['gpu_placeholder']);
+      }
+    }
+
+    // (b) Rows of one queue that disagree on purpose or wall time.
+    $groups = [];
+    foreach ($normalized as $row) {
+      $groups['q:' . $row['name']][] = $row;
+    }
+    foreach ($groups as $group) {
+      $name = $group[0]['name'];
+      $purposes = array_values(array_unique(array_map(static fn ($r) => $r['purpose'], $group), SORT_REGULAR));
+      if (count($purposes) > 1) {
+        $flags[] = sprintf('Queue "%s" has rows with different purposes.', $name);
+      }
+      $walls = array_values(array_unique(array_map(static fn ($r) => $r['max_wall_minutes'], $group), SORT_REGULAR));
+      if (count($walls) > 1) {
+        $flags[] = sprintf('Queue "%s" has rows with different max wall times (%s).', $name, implode(', ', array_map(static fn ($v) => $v === NULL ? 'blank' : (string) $v, $walls)));
+      }
+    }
+
+    // (c) Hardware that differs only in formatting.
+    $variants = [];
+    foreach ($normalized as $row) {
+      $tuple = $this->tuple($row);
+      if (count(array_filter($tuple, static fn ($v) => $v !== NULL)) === 0) {
         continue;
       }
-      $users = [];
-      foreach ($queues as $queue) {
-        if (in_array($type['label'], array_column($queue['nodes'], 'node_type'), TRUE)) {
-          $users[] = $queue['name'];
-        }
-      }
-      if (count($users) > 1) {
-        $report[] = sprintf('Queues "%s" share node type "%s", which lists no GPU. If they run on different hardware (an FPGA or other accelerator), split it into one node type per queue.', implode('", "', $users), $type['label']);
-      }
+      $key = json_encode(array_map([$this, 'comparable'], $tuple));
+      $variants[$key][json_encode($tuple)] = $row['name'];
     }
+    foreach ($variants as $byTuple) {
+      if (count($byTuple) < 2) {
+        continue;
+      }
+      $descriptions = [];
+      foreach ($byTuple as $json => $queueName) {
+        $descriptions[] = sprintf('"%s" (queue "%s")', implode(' / ', array_map(static fn ($v) => $v ?? 'blank', json_decode($json, TRUE))), $queueName);
+      }
+      $flags[] = 'Hardware differs only in formatting: ' . implode(' vs ', $descriptions) . '.';
+    }
+
+    return $flags;
   }
 
   /**
-   * Builds one queue from its rows, applying the purpose and wall-time rules.
+   * Hashes legacy rows so a curated mapping can detect later edits.
+   *
+   * @param array<int, array<string, mixed>> $rows
+   *   Legacy rows in editor order, with scalar or NULL values.
+   *
+   * @return string
+   *   A sha256 hex digest, sensitive to row order.
+   */
+  public static function legacyHash(array $rows): string {
+    $sorted = [];
+    foreach (array_values($rows) as $row) {
+      ksort($row);
+      $sorted[] = $row;
+    }
+    return hash('sha256', json_encode($sorted, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_PRESERVE_ZERO_FRACTION | JSON_THROW_ON_ERROR));
+  }
+
+  /**
+   * The hardware tuple of a normalized row.
+   *
+   * @param array<string, mixed> $row
+   *   A normalized row.
+   *
+   * @return list<mixed>
+   *   CPU type, CPU count, RAM, GPU type, GPU count, GPU vRAM.
+   */
+  private function tuple(array $row): array {
+    return [
+      $row['cpu_type'], $row['cpu_count'], $row['ram'],
+      $row['gpu_type'], $row['gpu_count'], $row['gpu_vram'],
+    ];
+  }
+
+  /**
+   * Normalizes a tuple value for formatting-insensitive comparison.
+   *
+   * Lowercases, drops parenthesized segments and collapses anything that is not
+   * a letter or digit.
+   *
+   * @param mixed $value
+   *   A tuple value.
+   *
+   * @return string|null
+   *   The comparable form, or NULL for blank.
+   */
+  private function comparable(mixed $value): ?string {
+    if ($value === NULL) {
+      return NULL;
+    }
+    $text = mb_strtolower((string) $value);
+    $text = preg_replace('/\([^)]*\)/', ' ', $text) ?? $text;
+    $text = preg_replace('/[^\p{L}\p{N}]+/u', ' ', $text) ?? $text;
+    return trim($text);
+  }
+
+  /**
+   * Builds one queue, using the first row's purpose and wall time.
    *
    * @param string $name
    *   The queue name.
    * @param array<int, array<string, mixed>> $rows
    *   The normalized rows of this queue.
-   * @param array<int, array<string, mixed>> $nodeTypes
-   *   Node types, modified when row purposes become descriptions.
    * @param string[] $report
    *   Report lines, appended to.
    *
    * @return array<string, mixed>
    *   The queue.
    */
-  private function buildQueue(string $name, array $rows, array &$nodeTypes, array &$report): array {
-    $purposes = array_values(array_unique(array_map(static fn ($r) => $r['purpose'], $rows), SORT_REGULAR));
-    if (count($purposes) <= 1) {
-      $purpose = $purposes[0] ?? NULL;
-    }
-    else {
-      $purpose = NULL;
-      foreach ($rows as $row) {
-        if ($row['purpose'] !== NULL && $nodeTypes[$row['type_index']]['description'] === NULL) {
-          $nodeTypes[$row['type_index']]['description'] = $row['purpose'];
-        }
-      }
-      $report[] = sprintf('Queue "%s" had %d different purposes across its rows; left the queue purpose blank and moved them to node type descriptions where those were empty.', $name, count($purposes));
-    }
-
-    $walls = array_map(static fn ($r) => $r['max_wall_minutes'], $rows);
-    $distinct = array_values(array_unique($walls, SORT_REGULAR));
-    $wall = NULL;
-    foreach ($walls as $candidate) {
-      if ($candidate !== NULL) {
-        $wall = $candidate;
-        break;
-      }
-    }
-    if (count($distinct) > 1) {
-      $report[] = sprintf('Queue "%s" had different max wall times across its rows (%s); used %s.', $name, implode(', ', array_map(static fn ($v) => $v === NULL ? 'blank' : (string) $v, $distinct)), $wall === NULL ? 'blank' : (string) $wall);
-    }
-
-    $nodes = [];
-    foreach ($rows as $row) {
-      $nodes[] = ['node_type' => $row['label'], 'node_count' => $row['node_count']];
-    }
-
+  private function buildQueue(string $name, array $rows, array &$report): array {
     return [
       'name' => $name,
-      'purpose' => $purpose,
-      'max_wall_minutes' => $wall,
-      'nodes' => $nodes,
+      'purpose' => $rows[0]['purpose'],
+      'max_wall_minutes' => $rows[0]['max_wall_minutes'],
+      'charged_per' => NULL,
+      'access' => NULL,
     ];
   }
 
@@ -196,13 +255,13 @@ final class QueueSpecMigrator {
   private function addNodeType(array &$nodeTypes, array $row, string $base, array &$report): int {
     $label = $this->uniqueLabel($nodeTypes, $base, $row['ram'], $report);
 
-    $gpus = [];
+    $accelerators = [];
     if ($row['gpu_placeholder'] === NULL && $row['gpu_type'] !== NULL) {
       $models = preg_split('/\s*(?:,|\s\+\s)\s*/', $row['gpu_type']) ?: [];
       $models = array_values(array_filter(array_map('trim', $models), static fn ($m) => $m !== ''));
       if (count($models) > 1) {
         foreach ($models as $model) {
-          $gpus[] = ['type' => $model, 'count' => NULL, 'vram' => NULL];
+          $accelerators[] = ['type' => 'gpu', 'model' => $model, 'count' => NULL, 'memory' => NULL];
         }
         $report[] = sprintf(
           'Node type "%s" lists several GPU models ("%s", count %s, vRAM %s); split into %d GPUs with blank count and vRAM. Fill them in.',
@@ -214,11 +273,24 @@ final class QueueSpecMigrator {
         );
       }
       else {
-        $gpus[] = ['type' => $row['gpu_type'], 'count' => $row['gpu_count'], 'vram' => $row['gpu_vram']];
+        $accelerators[] = [
+          'type' => 'gpu',
+          'model' => $row['gpu_type'],
+          'count' => $row['gpu_count'],
+          'memory' => $row['gpu_vram'],
+        ];
       }
     }
     elseif ($row['gpu_placeholder'] === NULL && ($row['gpu_count'] !== NULL || $row['gpu_vram'] !== NULL)) {
-      $report[] = sprintf('Node type "%s" had GPU count %s and vRAM %s but no GPU type; dropped them. Add the GPU model by hand.', $label, $row['gpu_count'] ?? 'blank', $row['gpu_vram'] ?? 'blank');
+      // A GPU count with no model (Expanse's ind-gpu) still documents GPUs;
+      // dropping it would make the queue stop matching a GPU search.
+      $accelerators[] = [
+        'type' => 'gpu',
+        'model' => NULL,
+        'count' => $row['gpu_count'],
+        'memory' => $row['gpu_vram'],
+      ];
+      $report[] = sprintf('Node type "%s" has GPU count %s and vRAM %s but no GPU model; kept them on a GPU with a blank model. Add the model.', $label, $row['gpu_count'] ?? 'blank', $row['gpu_vram'] ?? 'blank');
     }
 
     $nodeTypes[] = [
@@ -226,9 +298,11 @@ final class QueueSpecMigrator {
       'description' => NULL,
       'node_count' => NULL,
       'cpu_type' => $row['cpu_type'],
+      'cpu_architecture' => NULL,
       'cpu_count' => $row['cpu_count'],
       'ram' => $row['ram'],
-      'gpus' => $gpus,
+      'accelerators' => $accelerators,
+      'queues' => [],
     ];
     return count($nodeTypes) - 1;
   }
