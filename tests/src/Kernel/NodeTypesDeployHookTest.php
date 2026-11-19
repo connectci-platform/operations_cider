@@ -8,11 +8,11 @@ use Drupal\paragraphs\Entity\Paragraph;
 use Drupal\Tests\operations_cider\Traits\NodeTypeFieldsTrait;
 
 /**
- * Covers the post_update that splits queue hardware into node types.
+ * Covers the deploy hook that splits queue hardware into node types.
  *
  * @group operations_cider
  */
-class NodeTypesPostUpdateTest extends KernelTestBase {
+class NodeTypesDeployHookTest extends KernelTestBase {
 
   use NodeTypeFieldsTrait;
 
@@ -35,15 +35,15 @@ class NodeTypesPostUpdateTest extends KernelTestBase {
     $this->installEntitySchema('file');
     $this->installSchema('node', ['node_access']);
     $this->setUpNodeTypeFields();
-    \Drupal::moduleHandler()->loadInclude('operations_cider', 'php', 'operations_cider.post_update');
+    \Drupal::moduleHandler()->loadInclude('operations_cider', 'php', 'operations_cider.deploy');
   }
 
   /**
    * Two queues, one of them on two hardware rows, become node types + queues.
    */
-  public function testPostUpdateCreatesNodeTypesAndQueues(): void {
+  public function testDeployHookCreatesNodeTypesAndQueues(): void {
     $node = $this->makeResource();
-    $this->runPostUpdate();
+    $this->runDeployHook();
 
     $node = Node::load($node->id());
     $types = $node->get('field_rp_node_types')->referencedEntities();
@@ -83,15 +83,15 @@ class NodeTypesPostUpdateTest extends KernelTestBase {
   /**
    * Running the update again changes nothing.
    */
-  public function testPostUpdateIsIdempotent(): void {
+  public function testDeployHookIsIdempotent(): void {
     $node = $this->makeResource();
-    $this->runPostUpdate();
+    $this->runDeployHook();
     $paragraphs = \Drupal::entityQuery('paragraph')->accessCheck(FALSE)->count()->execute();
     $first = Node::load($node->id());
     $labels = $this->labelsOf($first->get('field_rp_node_types')->referencedEntities());
     $revision = $first->getRevisionId();
 
-    $this->runPostUpdate();
+    $this->runDeployHook();
 
     $second = Node::load($node->id());
     $this->assertSame($paragraphs, (int) \Drupal::entityQuery('paragraph')->accessCheck(FALSE)->count()->execute());
@@ -123,7 +123,7 @@ class NodeTypesPostUpdateTest extends KernelTestBase {
     ]);
     $node->save();
 
-    $this->runPostUpdate();
+    $this->runDeployHook();
 
     $node = Node::load($node->id());
     $this->assertSame(['Hand entered'], $this->labelsOf($node->get('field_rp_node_types')->referencedEntities()));
@@ -153,7 +153,7 @@ class NodeTypesPostUpdateTest extends KernelTestBase {
     $sandbox = [];
     $passes = 0;
     do {
-      operations_cider_post_update_d3090_01_node_types($sandbox);
+      operations_cider_deploy_d3090_01_node_types($sandbox);
       $passes++;
     } while (($sandbox['#finished'] ?? 1) < 1 && $passes < 20);
 
@@ -221,13 +221,13 @@ class NodeTypesPostUpdateTest extends KernelTestBase {
   }
 
   /**
-   * Runs the post_update to completion, as update.php batches would.
+   * Runs the deploy hook to completion, as drush deploy batches would.
    */
-  private function runPostUpdate(): void {
+  private function runDeployHook(): void {
     $sandbox = [];
     $passes = 0;
     do {
-      operations_cider_post_update_d3090_01_node_types($sandbox);
+      operations_cider_deploy_d3090_01_node_types($sandbox);
       $passes++;
     } while (($sandbox['#finished'] ?? 1) < 1 && $passes < 20);
     $this->assertSame([], $sandbox['failed'], 'No resource should fail to migrate.');

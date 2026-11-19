@@ -9,7 +9,7 @@ namespace Drupal\operations_cider;
  * same nodes entered the same CPU and GPU five times. This groups the rows by
  * hardware into node types (entered once) and by queue name into queues that
  * point at node types with a per-queue node count. It is pure PHP so the rules
- * can be unit tested against real rows; the post_update applies the result.
+ * can be unit tested against real rows; the deploy hook applies the result.
  */
 final class QueueSpecMigrator {
 

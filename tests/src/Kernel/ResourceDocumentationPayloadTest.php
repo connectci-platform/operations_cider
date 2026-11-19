@@ -568,11 +568,11 @@ class ResourceDocumentationPayloadTest extends KernelTestBase {
     $this->assertCount(10, $before['queues'], 'Before migration there is one queue entry per legacy row.');
     $this->assertSame([], $before['queues'][0]['nodes'], 'Queues are present without node types, with no node entries.');
 
-    \Drupal::moduleHandler()->loadInclude('operations_cider', 'php', 'operations_cider.post_update');
+    \Drupal::moduleHandler()->loadInclude('operations_cider', 'php', 'operations_cider.deploy');
     $sandbox = [];
     $passes = 0;
     do {
-      operations_cider_post_update_d3090_01_node_types($sandbox);
+      operations_cider_deploy_d3090_01_node_types($sandbox);
       $passes++;
     } while (($sandbox['#finished'] ?? 1) < 1 && $passes < 20);
     $this->assertSame([], $sandbox['failed']);
